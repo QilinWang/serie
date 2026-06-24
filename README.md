@@ -1,5 +1,7 @@
 # SERIE
 
+[中文说明](README.zh-CN.md)
+
 **Stress-test a time-series forecaster before you ship it — against the regime shifts and measurement noise *you* know it will face, with ground truth known exactly.**
 
 
