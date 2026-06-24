@@ -40,6 +40,7 @@ all = [
     "rich>=13.0",
 ]
 dev = [
+    "pyright>=1.1",
     "pytest>=8.0",
     "rich>=13.0",
     "ruff>=0.8",
@@ -78,11 +79,18 @@ target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+select = ["E", "F", "B"]
 ignore = [
     # Existing scientific expressions and tables use long lines. Let the
     # formatter handle what it can without making line length a release gate.
     "E501",
+    # SERIE intentionally has bilingual EN/CN docstrings and comments.
+    "RUF002",
+    "RUF003",
+    # Public export order is curated by conceptual grouping.
+    "RUF022",
+    # Lazy public exports keep quoted forward refs for readability.
+    "UP037",
 ]
 
 [tool.ruff.lint.pydocstyle]

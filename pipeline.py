@@ -1041,8 +1041,8 @@ class StageComputeSplitStats(BundleStep):
         view = X[begin_idx:end_idx]  # Create View (Zero Memory Cost)
         count = float(view.shape[0])
 
-        mean = np.mean(view, axis=0, dtype=np.float32)
-        std = np.std(view, axis=0, ddof=self.ddof, dtype=np.float32)
+        mean = np.asarray(np.mean(view, axis=0, dtype=np.float32), dtype=np.float32)
+        std = np.asarray(np.std(view, axis=0, ddof=self.ddof, dtype=np.float32), dtype=np.float32)
 
         q01, q05, q25, median, q75, q95, q99 = np.quantile(
             view,
@@ -1099,6 +1099,8 @@ class StageInjectNoise(BundleStep):
             db.injected_sigma = 0.0
             return db
 
+        if db.series is None:
+            raise RuntimeError("StageInjectNoise requires db.series")
         T, D = db.series.shape
         assert self.noise_draw.shape == (T, D), (
             f"noise_draw {self.noise_draw.shape} != data ({T}, {D})"
@@ -1127,6 +1129,8 @@ class StageInjectTrainScaledNoise(BundleStep):
             db.injected_sigma = 0.0
             return db
 
+        if db.series is None:
+            raise RuntimeError("StageInjectTrainScaledNoise requires db.series")
         T, D = db.series.shape
         assert self.noise_draw.shape == (T, D), (
             f"noise_draw {self.noise_draw.shape} != data ({T}, {D})"

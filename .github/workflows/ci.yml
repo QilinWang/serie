@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  lint-type-test:
+    name: Lint, type-check, test (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.12"
+          - "3.14"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Ruff
+        run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" ruff check .
+
+      - name: Pyright
+        run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" pyright
+
+      - name: Pytest
+        run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q
+
+  build-wheel:
+    name: Build and inspect wheel
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Build distributions
+        run: uv build . --out-dir dist
+
+      - name: Inspect wheel contents
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import sys
+          import zipfile
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {wheels}")
+
+          with zipfile.ZipFile(wheels[0]) as zf:
+              names = set(zf.namelist())
+
+          required = {
+              "serie/demo_dist/index.html",
+          }
+          forbidden_fragments = (
+              "node_modules/",
+              "serie/demo/",
+              "attractor_data.json",
+              ".pytest_cache/",
+              "__pycache__/",
+          )
+          missing = sorted(required - names)
+          forbidden = sorted(
+              name
+              for name in names
+              if any(fragment in name for fragment in forbidden_fragments)
+          )
+          if missing or forbidden:
+              print("missing:", missing)
+              print("forbidden:", forbidden[:40])
+              raise SystemExit(1)
+
+          print(f"wheel OK: {wheels[0]} ({len(names)} entries)")
+          PY

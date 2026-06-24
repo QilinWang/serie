@@ -1,0 +1,30 @@
+{
+  "include": [
+    "__init__.py",
+    "api.py",
+    "catalog.py",
+    "cli.py",
+    "data.py",
+    "diagnostics.py",
+    "example.py",
+    "integrators.py",
+    "pipeline.py",
+    "plots.py",
+    "specs.py"
+  ],
+  "exclude": [
+    ".git",
+    ".pytest_cache",
+    "assets",
+    "build",
+    "demo",
+    "demo_dist",
+    "dist",
+    "release_artifacts",
+    "serie.egg-info",
+    "tests",
+    "tmp"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic"
+}

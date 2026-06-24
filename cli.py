@@ -8,7 +8,7 @@ import json
 import logging
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import attrs
 import cappa
@@ -329,13 +329,16 @@ def _generate_payload(
             draw_design=draw_design,
             overwrite=overwrite,
         )
+        manifest_files = cast(dict[str, object], manifest["files"])
+        manifest_shape = cast(dict[str, object], manifest["shape"])
+        manifest_noisy = cast(list[dict[str, object]], manifest["noisy"])
         artifacts["arrays"] = {
             "array_format": array_format,
             "draw_design": DrawDesign(draw_design).value,
-            "files": manifest["files"],
+            "files": manifest_files,
             "manifest": str(out / "manifest.json"),
-            "n_noisy": len(manifest["noisy"]),
-            "shape": manifest["shape"],
+            "n_noisy": len(manifest_noisy),
+            "shape": manifest_shape,
         }
 
     if plot != "none":
@@ -408,16 +411,19 @@ def _export_payload(
         draw_design=draw_design,
         overwrite=overwrite,
     )
+    manifest_files = cast(dict[str, object], manifest["files"])
+    manifest_shape = cast(dict[str, object], manifest["shape"])
+    manifest_noisy = cast(list[dict[str, object]], manifest["noisy"])
     return {
         "out_dir": str(out),
         "source": source,
         "name": bank.name,
         "array_format": array_format,
         "draw_design": DrawDesign(draw_design).value,
-        "files": manifest["files"],
+        "files": manifest_files,
         "manifest": str(out / "manifest.json"),
-        "n_noisy": len(manifest["noisy"]),
-        "shape": manifest["shape"],
+        "n_noisy": len(manifest_noisy),
+        "shape": manifest_shape,
     }
 
 
@@ -541,14 +547,21 @@ def _walkthrough_payload(
         (arrays_dir / "lorenz", regular_manifest),
         (arrays_dir / "lorenz_param_shock", shifted_manifest),
     ):
-        for rel in manifest["files"].values():
+        manifest_files = cast(dict[str, object], manifest["files"])
+        manifest_noisy = cast(list[dict[str, object]], manifest["noisy"])
+        for rel in manifest_files.values():
             files.append(export_dir / str(rel))
-        for noisy in manifest["noisy"]:
-            for rel in noisy["files"].values():
+        for noisy in manifest_noisy:
+            noisy_files = cast(dict[str, object], noisy["files"])
+            for rel in noisy_files.values():
                 files.append(export_dir / str(rel))
     for per_case in plot_files.values():
         files.extend(Path(path) for path in per_case.values())
 
+    regular_files = cast(dict[str, object], regular_manifest["files"])
+    regular_noisy = cast(list[dict[str, object]], regular_manifest["noisy"])
+    shifted_files = cast(dict[str, object], shifted_manifest["files"])
+    shifted_noisy = cast(list[dict[str, object]], shifted_manifest["noisy"])
     return {
         "out_dir": str(out),
         "seed": seed,
@@ -569,14 +582,14 @@ def _walkthrough_payload(
             "regular": {
                 "dir": str(arrays_dir / "lorenz"),
                 "schema": regular_manifest["schema"],
-                "n_noisy": len(regular_manifest["noisy"]),
-                "files": regular_manifest["files"],
+                "n_noisy": len(regular_noisy),
+                "files": regular_files,
             },
             "param_shift": {
                 "dir": str(arrays_dir / "lorenz_param_shock"),
                 "schema": shifted_manifest["schema"],
-                "n_noisy": len(shifted_manifest["noisy"]),
-                "files": shifted_manifest["files"],
+                "n_noisy": len(shifted_noisy),
+                "files": shifted_files,
             },
         },
         "plots": plot_files,

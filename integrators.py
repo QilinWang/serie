@@ -50,29 +50,20 @@ import attr
 import numpy as np
 from numpy.typing import DTypeLike
 
-from .specs import (
-    LorenzParams,
-    RosslerParams,
-    Lorenz96Params,
-    ChuaParams,
-    OUParams,
-    SeasonalARParams,
+from .catalog import (
+    DISCRETE_SYSTEMS,
+    SYSTEMS,
+    DiagonalParams,
+    DoubleWellParams,
     GARCHParams,
     KSParams,
-    DoubleWellParams,
+    Lorenz96Params,
+    OUParams,
     SLDSParams,
-    HyperRosslerParams,
-    DuffingParams,
-    VanderPolParams,
-    HenonParams,
-    LogisticParams,
-    SystemParams,
-    DiagonalParams,
-    TrajectorySpec,
-    ShockType,
+    SeasonalARParams,
 )
-from attrs import define, field, AttrsInstance, asdict, astuple, validators
-from .catalog import SYSTEMS, DISCRETE_SYSTEMS
+from .specs import ShockType, TrajectorySpec
+from attrs import AttrsInstance, astuple
 
 
 @attr.define(frozen=True, slots=True)
@@ -961,7 +952,7 @@ def generate_from_trajectory_spec(
 
     if system == "ks":
         kind = "pde"
-        dim = int(getattr(params_obj, "nx"))
+        dim = int(cast(KSParams, params_obj).nx)
     elif system in DISCRETE_SYSTEMS:
         kind = "discrete"
         dim = 2 if system == "garch" else 1

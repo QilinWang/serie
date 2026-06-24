@@ -150,7 +150,8 @@ class TestPythonODE:
 
     def test_lorenz96_variable_dim(self):
         dim = 6
-        x0 = np.ones(dim); x0[0] += 0.01
+        x0 = np.ones(dim)
+        x0[0] += 0.01
         params = Lorenz96Params(forcing=8.0)
         traj = _np_ode("lorenz96", x0, STEPS, 0.007, params)
         assert traj.shape == (STEPS + 1, dim)

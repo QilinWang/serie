@@ -160,7 +160,7 @@ if TYPE_CHECKING:
     from .data import SplitTimeSeriesData, SourceKind, TimeSeriesData
     from .pipeline import DataBundle, KnownDataID, KnownMeta, PartitionSpec, DrawDesign, TitrationPlan
     from .specs import ShockEvent, ShockSchedule, ShockType, TitrationCell, TrajectorySpec, DGPBank
-    from .api import build_clean_split_bundle, build_noisy_bundle_for_cell, export_dgp_bank_files, iter_cells
+    from .api import build_clean_split_bundle, build_noisy_bundle_for_cell, iter_cells
 
 
 def __getattr__(name: str):

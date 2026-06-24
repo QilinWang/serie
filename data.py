@@ -18,7 +18,8 @@ import numpy as np
 from attrs import define, field
 
 if TYPE_CHECKING:
-    from .pipeline import KnownMeta
+    from .pipeline import DataBundle, KnownMeta, PartitionSpec, PartitionStats
+    from .specs import TitrationCell, TrajectorySpec
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -575,6 +575,12 @@ def _inject_noise_unit(
         db = db | StagePrintDiagnostics()
 
     _require_split_bundle(db, context="unit noise injection")
+    assert db.series is not None
+    assert db.feature_names is not None
+    assert db.indices is not None
+    assert db.train_partition_stats is not None
+    assert db.val_partition_stats is not None
+    assert db.test_partition_stats is not None
 
     return SplitTimeSeriesData(
         values=db.series,
@@ -654,6 +660,12 @@ def inject_noise(
         db_noisy = db_noisy | StagePrintDiagnostics()
 
     _require_split_bundle(db_noisy, context="train-std noise injection")
+    assert db_noisy.series is not None
+    assert db_noisy.feature_names is not None
+    assert db_noisy.indices is not None
+    assert db_noisy.train_partition_stats is not None
+    assert db_noisy.val_partition_stats is not None
+    assert db_noisy.test_partition_stats is not None
 
     return SplitTimeSeriesData(
         values=db_noisy.series,

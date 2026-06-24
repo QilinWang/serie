@@ -16,33 +16,19 @@ Design principles:
 from __future__ import annotations
 
 from enum import StrEnum, auto
-from typing import Literal
+from typing import TYPE_CHECKING
 import numpy as np
 from attrs import (
     define, 
-    field, 
-    Factory, 
-    evolve,       
+    field,       
     )
-from attrs.validators import ge, gt, le, instance_of
+from attrs.validators import ge, le
+
+if TYPE_CHECKING:
+    from .pipeline import DataBundle
+
 # System parameter classes, SystemParams union, ODESystem enum → catalog.py
 from .catalog import (  # noqa: E402
-    LorenzParams,
-    RosslerParams,
-    HyperRosslerParams,
-    ChuaParams,
-    DuffingParams,
-    VanderPolParams,
-    Lorenz96Params,
-    HenonParams,
-    LogisticParams,
-    OUParams,
-    DoubleWellParams,
-    SLDSParams,
-    SeasonalARParams,
-    GARCHParams,
-    KSParams,
-    DiagonalParams,
     SystemParams,
     ODESystem,
 )

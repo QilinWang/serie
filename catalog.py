@@ -14,10 +14,10 @@ from typing import Callable, Literal, TYPE_CHECKING
 
 import attr
 import numpy as np
-from attrs import AttrsInstance, define, field, evolve
+from attrs import AttrsInstance, define, evolve
 
 if TYPE_CHECKING:
-    from .specs import TrajectorySpec, ShockSchedule, ShockEvent
+    from .specs import TrajectorySpec
 
 
 # ═══════════════════════════════════════════════════════════════════════════

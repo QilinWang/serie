@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from rich.console import Console
     from rich.table import Table
 
-    from .pipeline import DataBundle, BundleStep
+    from .pipeline import DataBundle
 
 logger = logging.getLogger(__name__)
 

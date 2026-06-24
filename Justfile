@@ -49,6 +49,23 @@ example-run:
 dev-test:
     UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q
 
+# Run Ruff lint checks against the checkout.
+[group("03 author-dev")]
+dev-lint:
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" ruff check .
+
+# Run Pyright on source files listed in pyrightconfig.json.
+[group("03 author-dev")]
+dev-type:
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" pyright
+
+# Local version of the GitHub CI gate: lint, type-check, and test.
+[group("03 author-dev")]
+ci-check:
+    just dev-lint
+    just dev-type
+    just dev-test
+
 # Optional: create/update persistent local .venv; normal recipes do not need it.
 [group("03 author-dev")]
 dev-env:
@@ -81,7 +98,7 @@ release-check tmp="tmp/release_check":
 # Full local gate before publishing: test editable code, then test the built wheel.
 [group("04 author-release")]
 release-ready:
-    just dev-test
+    just ci-check
     just release-check
 
 # Print the publish command without uploading anything.
