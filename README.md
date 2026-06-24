@@ -668,30 +668,3 @@ local data preparation.
 cd serie
 python -m pytest tests -q
 ```
-
-## Maintainer Checks
-
-Local checks mirror GitHub Actions:
-
-```bash
-just ci-check       # ruff, pyright, pytest
-just release-ready  # ci-check plus clean wheel install audit
-```
-
-GitHub CI runs on pushes and pull requests. It checks Python 3.12 and 3.14,
-then builds the wheel and verifies that the wheel contains the offline demo
-template but not `node_modules`, demo source, generated JSON, caches, or build
-junk.
-
-Publishing is handled by `.github/workflows/publish.yml` on `v*` tags or manual
-dispatch. Configure PyPI Trusted Publishing for this repository with:
-
-```text
-Owner: QilinWang
-Repository: serie
-Workflow: publish.yml
-Environment: pypi
-```
-
-After that, the workflow can publish with `uv publish --trusted-publishing`
-without storing a PyPI token in the repository or shell history.

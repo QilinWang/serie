@@ -380,7 +380,7 @@ def build_empirical_dgp_bank(
     if data.shape[0] < 2 or data.shape[1] < 1:
         raise ValueError(f"values must have at least 2 rows and 1 channel, got {data.shape}")
 
-    clean = np.ascontiguousarray(data, dtype=np.float32)[None, :, :]
+    clean = np.array(data, dtype=np.float32, copy=True, order="C")[None, :, :]
     _, T, D = clean.shape
     trajectory_draw_seeds = spawn_draw_seeds(0, 1)
     noise_draw_seeds = spawn_draw_seeds(noise_seed_base, n_noise_draws)

@@ -69,7 +69,7 @@ class TimeSeriesData:
     metadata: Mapping[str, object] = field(factory=dict)
 
     def __attrs_post_init__(self) -> None:
-        values = np.ascontiguousarray(self.values, dtype=np.float32)
+        values = np.array(self.values, dtype=np.float32, copy=True, order="C")
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "feature_names", tuple(self.feature_names))
         object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
@@ -118,7 +118,7 @@ class SplitTimeSeriesData:
     metadata: Mapping[str, object] = field(factory=dict)
 
     def __attrs_post_init__(self) -> None:
-        values = np.ascontiguousarray(self.values, dtype=np.float32)
+        values = np.array(self.values, dtype=np.float32, copy=True, order="C")
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "feature_names", tuple(self.feature_names))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))

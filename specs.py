@@ -687,7 +687,7 @@ class DGPBank:
         """
         self._check_cell(trajectory_draw_ordinal, noise_draw_ordinal)
         if noise_level == 0.0:
-            return self.clean[trajectory_draw_ordinal]
+            return np.array(self.clean[trajectory_draw_ordinal], dtype=np.float32, copy=True)
         return self.clean[trajectory_draw_ordinal] + noise_level * self.noise_draws[noise_draw_ordinal]
     # ── Shape accessors ──
 

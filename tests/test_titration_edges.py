@@ -513,7 +513,7 @@ class TestProvenance:
         with pytest.raises(ValueError, match="noise_only"):
             list(iter_cells(bank, plan))
 
-    def test_stochastic_auto_pairs_trajess_and_noiseervation_reps(self):
+    def test_stochastic_auto_pairs_trajectory_and_noise_draws(self):
         bank = build_dgp_bank(
             small_ou(), seed=0, n_trajectory_draws=3, n_noise_draws=3, verbose=False
         )

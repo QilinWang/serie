@@ -30,6 +30,7 @@ from serie.catalog import (
     HenonParams,
     LogisticParams,
     OUParams,
+    DiagonalParams,
 )
 from serie import ShockEvent, ShockSchedule, TrajectorySpec
 from serie.integrators import (
@@ -179,6 +180,32 @@ class TestPythonODE:
         lyap = _estimate_lorenz_largest_lyapunov()
         assert 0.75 < lyap < 1.05
 
+    def test_burn_in_removes_raw_prefix_exactly(self):
+        full_spec = TrajectorySpec.diagonal(
+            eigenvalues=(-0.25, -0.5),
+            steps=40,
+            dt=0.01,
+            burn_in=0,
+        )
+        burn_spec = TrajectorySpec.diagonal(
+            eigenvalues=(-0.25, -0.5),
+            steps=40,
+            dt=0.01,
+            burn_in=7,
+        )
+        full = generate_from_trajectory_spec(full_spec, seed=0)
+        burned = generate_from_trajectory_spec(burn_spec, seed=0)
+        np.testing.assert_array_equal(burned, full[7:])
+
+    def test_diagonal_discrete_ratios_match_exp_lambda_dt(self):
+        eigenvalues = (-0.2, -0.5, 0.1)
+        dt = 1e-3
+        spec = TrajectorySpec.diagonal(eigenvalues=eigenvalues, steps=4, dt=dt, burn_in=0)
+        traj = generate_from_trajectory_spec(spec, seed=0).astype(np.float64)
+        observed = traj[1] / traj[0]
+        expected = np.exp(np.array(eigenvalues, dtype=np.float64) * dt)
+        np.testing.assert_allclose(observed, expected, rtol=1e-6, atol=1e-7)
+
 
 class TestPythonMap:
     def test_henon_bounded(self):
@@ -242,6 +269,44 @@ class TestPythonShock:
         np.testing.assert_array_equal(baseline[:100], shocked[:100])
         assert np.max(np.abs(baseline[105:] - shocked[105:])) > 1e-4
         assert np.max(np.abs(baseline[305:] - shocked[305:])) > 1e-3
+
+    def test_step_shock_schedule_param_transition_interpolates_params(self):
+        before = DiagonalParams(eigenvalues=(0.0, 2.0))
+        after = DiagonalParams(eigenvalues=(2.0, 4.0))
+        schedule = StepShockSchedule.param_transition(
+            before=before,
+            after=after,
+            start_step=2,
+            end_step=6,
+            n_inserts=2,
+        )
+
+        assert [event.step for event in schedule.events] == [4, 6]
+        assert [event.param_set_idx for event in schedule.events] == [1, 2]
+        assert schedule.param_sets == (
+            before,
+            DiagonalParams(eigenvalues=(1.0, 3.0)),
+            after,
+        )
+
+    def test_public_params_stepped_transition_changes_dynamics_gradually(self):
+        base = TrajectorySpec.diagonal(eigenvalues=(0.0,), steps=20, dt=0.05, burn_in=0)
+        transitioned = evolve(
+            base,
+            shocks=ShockSchedule.single(
+                ShockEvent.params_stepped_transition(
+                    params_after=DiagonalParams(eigenvalues=(2.0,)),
+                    t_start=0.2,
+                    t_end=0.6,
+                    n_inserts=2,
+                )
+            ),
+        )
+
+        baseline = generate_from_trajectory_spec(base, seed=0)
+        shocked = generate_from_trajectory_spec(transitioned, seed=0)
+        np.testing.assert_array_equal(baseline[:8], shocked[:8])
+        assert shocked[-1, 0] > baseline[-1, 0]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
