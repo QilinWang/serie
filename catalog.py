@@ -127,7 +127,7 @@ def lorenz_param_shock_spec():
     return evolve(
         lorenz_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.params_replace(
+            ShockEvent.params_step_change(
                 params_after=LorenzParams(sigma=10.1, rho=28.1, beta=8.1 / 3.0),
                 t_start=0.35,
             )
@@ -140,7 +140,7 @@ def lorenz_state_shock_spec():
     return evolve(
         lorenz_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.state_kick(state_idx=0, eps=0.9, t_start=0.35)
+            ShockEvent.state_perturbation(state_idx=0, eps=0.9, t_start=0.35)
         ),
     )
 
@@ -150,7 +150,7 @@ def lorenz_switch_spec():
     return evolve(
         lorenz_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.trajectory_splice(
+            ShockEvent.trajectory_switch(
                 ic_b=(1.002, 0.982, 1.102),
                 params_after=LorenzParams(sigma=10.0, rho=28.1, beta=8.0 / 3.0),
                 t_start=0.35,
@@ -204,7 +204,7 @@ def rossler_param_shock_spec():
     return evolve(
         rossler_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.params_replace(
+            ShockEvent.params_step_change(
                 params_after=RosslerParams(a=0.25, b=0.25, c=5.75),
                 t_start=0.35,
             )
@@ -323,7 +323,7 @@ def chua_param_shock_spec():
     return evolve(
         chua_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.params_replace(
+            ShockEvent.params_step_change(
                 params_after=ChuaParams(
                     alpha=15.9,
                     beta=28.5,
@@ -341,7 +341,7 @@ def chua_switch_spec():
     return evolve(
         chua_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.trajectory_splice(ic_b=(0.11, 0.01, 0.02), t_start=0.35)
+            ShockEvent.trajectory_switch(ic_b=(0.11, 0.01, 0.02), t_start=0.35)
         ),
     )
 
@@ -458,7 +458,7 @@ def lorenz96_switch_spec():
     return evolve(
         lorenz96_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.trajectory_splice(
+            ShockEvent.trajectory_switch(
                 ic_b=(0.99, 1.02, 1.02, 1.03, 1.01, 1.01),
                 params_after=Lorenz96Params(forcing=9.0),
                 t_start=0.35,
@@ -568,7 +568,7 @@ def ou_param_shock_spec():
     return evolve(
         ou_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.params_replace(
+            ShockEvent.params_step_change(
                 params_after=OUParams(theta=0.2, mu=0.5, sigma_noise=0.3),
                 t_start=0.35,
             )
@@ -622,7 +622,7 @@ def doublewell_param_shock_spec():
     return evolve(
         doublewell_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.params_replace(
+            ShockEvent.params_step_change(
                 params_after=DoubleWellParams(a=1.0, sigma_noise=0.35),
                 t_start=0.35,
             )
@@ -635,7 +635,7 @@ def doublewell_switch_spec():
     return evolve(
         doublewell_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.trajectory_splice(
+            ShockEvent.trajectory_switch(
                 ic_b=(0.0,),
                 params_after=DoubleWellParams(a=1.0, sigma_noise=0.35),
                 t_start=0.35,
@@ -688,7 +688,7 @@ def slds_param_shock_spec():
     return evolve(
         slds_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.params_replace(
+            ShockEvent.params_step_change(
                 params_after=SLDSParams(
                     A1=0.83,
                     Q1=0.50,
@@ -708,7 +708,7 @@ def slds_switch_spec():
     return evolve(
         slds_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.trajectory_splice(
+            ShockEvent.trajectory_switch(
                 ic_b=(0.0,),
                 params_after=SLDSParams(
                     A1=0.87,
@@ -763,7 +763,7 @@ def seasonal_ar_param_shock_spec():
     return evolve(
         seasonal_ar_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.params_replace(
+            ShockEvent.params_step_change(
                 params_after=SeasonalARParams(S=24, phi=0.8, sigma=0.35, a0=1.4, amp_drift=0e-4),
                 t_start=0.35,
             )
@@ -820,7 +820,7 @@ def garch_param_shock_spec():
     return evolve(
         garch_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.params_replace(
+            ShockEvent.params_step_change(
                 params_after=GARCHParams(omega=0.03, alpha=0.15, beta=0.70),
                 t_start=0.35,
             )
@@ -873,7 +873,7 @@ def ks_param_shock_spec():
     return evolve(
         ks_spec(),
         shocks=ShockSchedule.single(
-            ShockEvent.params_replace(
+            ShockEvent.params_step_change(
                 params_after=KSParams(nx=64, Lx=22.0, nu=0.80, dealias=True),
                 t_start=0.35,
             )

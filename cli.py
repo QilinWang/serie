@@ -14,14 +14,18 @@ import attrs
 import cappa
 
 from . import PartitionSpec, export_dgp_bank_files, build_dgp_bank, inject_noise
-from .catalog import list_sources
+from .catalog import list_sources, source_preset
 from .pipeline import KnownDataID, DrawDesign, known_data_root
+from .specs import ShockSchedule, TrajectorySpec
 
 
 OutputFormat = Literal["text", "json"]
 PlotKind = Literal["timeseries", "attractor", "both"]
+PlotRequest = Literal["none", "timeseries", "attractor", "both"]
 PlotFormat = Literal["png", "pdf", "svg"]
 ArrayFormat = Literal["npy", "csv", "both"]
+ArrayRequest = Literal["none", "npy", "csv", "both"]
+ShockRequest = Literal["none", "param", "state", "switch"]
 _DEMO_SOURCES = ("lorenz", "rossler", "chua")
 
 
@@ -56,40 +60,28 @@ _CLI_COMMANDS = (
         "example": "serie data-dir --format json",
     },
     {
-        "group": "02 inspect",
-        "command": "inspect",
-        "summary": "Build one DGP bank and report shape, feature names, and seed provenance.",
-        "example": "serie inspect lorenz --format json",
+        "group": "02 generate",
+        "command": "generate",
+        "summary": "Generate one SERIE cell: optional intervention, noise dose, split, and optional files.",
+        "example": "serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz --plot both --array-format csv",
     },
     {
-        "group": "03 generate",
-        "command": "inject-noise",
-        "summary": "Build one DGP bank, inject one sigma dose, and return train/val/test split metadata.",
-        "example": "serie inject-noise ou --sigma 0.1 --partition p70_20_10 --format json",
-    },
-    {
-        "group": "03 generate",
-        "command": "export",
-        "summary": "Write generated clean/noise arrays, optional noisy arrays, CSVs, and a manifest.",
-        "example": "serie export lorenz --out tmp/lorenz_export --sigma 0.1 --array-format both --format json",
-    },
-    {
-        "group": "04 visualize",
-        "command": "plot",
-        "summary": "Render generated source figures: timeseries, attractor, or both.",
-        "example": "serie plot lorenz --out tmp/lorenz.png --kind both --sigma 0.1 --format json",
-    },
-    {
-        "group": "05 walkthrough",
-        "command": "walkthrough",
-        "summary": "Generate the standard SERIE example: arrays, plots, and verification metadata.",
-        "example": "serie walkthrough --out tmp/walkthrough --array-format both --overwrite --format json",
-    },
-    {
-        "group": "05 walkthrough",
+        "group": "03 visualize",
         "command": "demo",
         "summary": "Generate an interactive 3D attractor HTML page with controllable noise.",
         "example": "serie demo lorenz --out lorenz_demo.html",
+    },
+    {
+        "group": "04 inspect",
+        "command": "inspect",
+        "summary": "Diagnostic: build one DGP bank and report shape, feature names, and seed provenance.",
+        "example": "serie inspect lorenz --format json",
+    },
+    {
+        "group": "05 audit",
+        "command": "walkthrough",
+        "summary": "Author/reviewer audit: generate arrays, plots, and verification metadata.",
+        "example": "serie walkthrough --out tmp/walkthrough --array-format both --overwrite --format json",
     },
     {
         "group": "06 metadata",
@@ -141,6 +133,51 @@ def _require_partition(name: str) -> str:
     return name
 
 
+_SHOCK_SUFFIX_BY_REQUEST: dict[ShockRequest, str] = {
+    "none": "",
+    "param": "_param_shock",
+    "state": "_state_shock",
+    "switch": "_switch",
+}
+
+
+def _normalize_source_name(source: str) -> str:
+    return source.lower().replace("-", "_")
+
+
+def _resolve_generate_source(source: str, *, shock: ShockRequest) -> tuple[str, TrajectorySpec]:
+    """Resolve CLI source + intervention flag into a concrete trajectory spec."""
+    from . import catalog
+
+    base = _normalize_source_name(source)
+    if shock == "none":
+        try:
+            return base, source_preset(base)()
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+
+    suffix = _SHOCK_SUFFIX_BY_REQUEST[shock]
+    target = base if base.endswith(suffix) else f"{base}{suffix}"
+    factory_name = f"{target}_spec"
+    factory = getattr(catalog, factory_name, None)
+    if factory is None:
+        try:
+            return target, source_preset(target)()
+        except ValueError as exc:
+            valid = ", ".join(list_sources())
+            raise SystemExit(
+                f"source {source!r} has no built-in {shock!r} intervention preset; "
+                f"valid base sources: {valid}"
+            ) from exc
+    return target, factory()
+
+
+def _reference_source_for_plot(source: TrajectorySpec) -> TrajectorySpec | None:
+    if source.shocks.is_stationary:
+        return None
+    return attrs.evolve(source, shocks=ShockSchedule.none())
+
+
 def _bank_payload(
     source: str, *, seed: int, noise_kind: str, verbose: bool
 ) -> dict[str, Any]:
@@ -163,24 +200,20 @@ def _bank_payload(
     }
 
 
-def _split_payload(
-    source: str,
+def _split_summary_payload(
     *,
-    seed: int,
+    source_key: str,
+    bank,
     sigma: float,
     sigma_scale: Literal["unit", "train_std"],
     partition_name: str,
-    noise_kind: str,
-    verbose: bool,
+    split,
+    shock: ShockRequest,
 ) -> dict[str, Any]:
-    source = _require_source(source)
-    partition_name = _require_partition(partition_name)
-    bank = build_dgp_bank(source, seed=seed, noise_kind=noise_kind, verbose=verbose)
-    partition = _PARTITIONS[partition_name]()
-    split = inject_noise(bank, sigma=sigma, sigma_scale=sigma_scale, partition=partition)
     return {
-        "source": source,
+        "source": source_key,
         "name": bank.name,
+        "shock": shock,
         "sigma": float(sigma),
         "sigma_scale": sigma_scale,
         "noise_kind": bank.noise_kind,
@@ -197,6 +230,149 @@ def _split_payload(
             "std_head": _array_summary(split.train_stats.std),
         },
     }
+
+
+def _split_payload(
+    source: str,
+    *,
+    seed: int,
+    sigma: float,
+    sigma_scale: Literal["unit", "train_std"],
+    partition_name: str,
+    noise_kind: str,
+    verbose: bool,
+) -> dict[str, Any]:
+    source = _require_source(source)
+    partition_name = _require_partition(partition_name)
+    bank = build_dgp_bank(source, seed=seed, noise_kind=noise_kind, verbose=verbose)
+    partition = _PARTITIONS[partition_name]()
+    split = inject_noise(bank, sigma=sigma, sigma_scale=sigma_scale, partition=partition)
+    return _split_summary_payload(
+        source_key=source,
+        bank=bank,
+        sigma=sigma,
+        sigma_scale=sigma_scale,
+        partition_name=partition_name,
+        split=split,
+        shock="none",
+    )
+
+
+def _generate_payload(
+    source: str,
+    *,
+    shock: ShockRequest,
+    out: Path | None,
+    seed: int,
+    n_trajectory_draws: int,
+    n_noise_draws: int,
+    noise_seed_base: int,
+    sigma: float,
+    sigma_scale: Literal["unit", "train_std"],
+    partition_name: str,
+    noise_kind: str,
+    array_format: ArrayRequest,
+    draw_design: DrawDesign | str,
+    plot: PlotRequest,
+    feature_idx: int,
+    features_idx: str,
+    max_points: int,
+    image_format: PlotFormat,
+    dpi: int,
+    overwrite: bool,
+    verbose: bool,
+) -> dict[str, Any]:
+    if out is None and (array_format != "none" or plot != "none"):
+        raise SystemExit("--out is required when writing arrays or plots")
+    if sigma_scale != "unit" and (array_format != "none" or plot != "none"):
+        raise SystemExit(
+            "--sigma-scale train_std is supported for split metadata. "
+            "File exports and plots currently require --sigma-scale unit because "
+            "they are written before partition-relative scaling can be represented."
+        )
+
+    source_key, source_spec = _resolve_generate_source(source, shock=shock)
+    partition_name = _require_partition(partition_name)
+    bank = build_dgp_bank(
+        source_spec,
+        seed=seed,
+        n_trajectory_draws=n_trajectory_draws,
+        n_noise_draws=n_noise_draws,
+        noise_seed_base=noise_seed_base,
+        noise_kind=noise_kind,
+        verbose=verbose,
+    )
+    partition = _PARTITIONS[partition_name]()
+    split = inject_noise(bank, sigma=sigma, sigma_scale=sigma_scale, partition=partition)
+    payload = _split_summary_payload(
+        source_key=source_key,
+        bank=bank,
+        sigma=sigma,
+        sigma_scale=sigma_scale,
+        partition_name=partition_name,
+        split=split,
+        shock=shock,
+    )
+
+    if out is None:
+        payload["artifacts"] = None
+        return payload
+
+    out.mkdir(parents=True, exist_ok=True)
+    artifacts: dict[str, Any] = {"out_dir": str(out)}
+    if array_format != "none":
+        manifest = export_dgp_bank_files(
+            bank,
+            out,
+            sigmas=(sigma,),
+            array_format=array_format,
+            draw_design=draw_design,
+            overwrite=overwrite,
+        )
+        artifacts["arrays"] = {
+            "array_format": array_format,
+            "draw_design": DrawDesign(draw_design).value,
+            "files": manifest["files"],
+            "manifest": str(out / "manifest.json"),
+            "n_noisy": len(manifest["noisy"]),
+            "shape": manifest["shape"],
+        }
+
+    if plot != "none":
+        from .plots import plot_dgp_bank_saves
+
+        reference_source = _reference_source_for_plot(source_spec)
+        reference_bank = (
+            build_dgp_bank(
+                reference_source,
+                seed=seed,
+                n_trajectory_draws=n_trajectory_draws,
+                n_noise_draws=n_noise_draws,
+                noise_seed_base=noise_seed_base,
+                noise_kind=noise_kind,
+                verbose=False,
+            )
+            if reference_source is not None
+            else None
+        )
+        plot_files = plot_dgp_bank_saves(
+            bank,
+            out=out,
+            kind=plot,
+            source=source_spec,
+            reference_bank=reference_bank,
+            sigma=sigma,
+            feature_idx=feature_idx,
+            features_idx=_parse_features_idx(features_idx),
+            max_points=max_points,
+            plot_format=image_format,
+            dpi=dpi,
+            overwrite=overwrite,
+        )
+        artifacts["plots"] = {name: str(path) for name, path in plot_files.items()}
+
+    payload["artifacts"] = artifacts
+    return payload
 
 
 def _export_payload(
@@ -528,6 +704,195 @@ class Inspect:
 
 @cappa.command
 @attrs.define
+class Generate:
+    """Generate one SERIE dataset cell.
+
+    This is the human/agent workflow command. It folds the common operations
+    into one place:
+
+    1. choose a source DGP, e.g. `lorenz`;
+    2. optionally choose an intervention preset with `--shock`;
+    3. choose an observation-noise dose with `--sigma`;
+    4. split into train/validation/test;
+    5. optionally write arrays and/or figures under `--out`.
+
+    The command always returns split metadata. It writes files only when `--out`
+    is passed together with `--array-format` or `--plot`.
+    """
+
+    # Source and intervention axis. `--shock param` turns `lorenz` into the
+    # built-in `lorenz_param_shock` preset; `--shock switch` maps to
+    # `lorenz_switch` where available. Use `--shock none` for the baseline DGP.
+    source: str
+    shock: Annotated[
+        ShockRequest,
+        cappa.Arg(
+            long=True,
+            help="Optional built-in intervention preset: none, param, state, or switch.",
+        ),
+    ] = "none"
+
+    # Observation-noise axis. `sigma` is the dose; `sigma_scale=train_std`
+    # makes that dose relative to each channel's train-split standard deviation.
+    sigma: Annotated[
+        float,
+        cappa.Arg(
+            long=True,
+            default=0.0,
+            help="Observation-noise dose. With unit-scale noise, this is the injected standard deviation.",
+        ),
+    ] = 0.0
+    sigma_scale: Annotated[
+        Literal["unit", "train_std"],
+        cappa.Arg(
+            long=True,
+            help="Noise scaling convention: unit or train_std.",
+        ),
+    ] = "unit"
+
+    # Dataset split. Train statistics are computed before train_std scaling, so
+    # the split choice is part of the generated cell definition.
+    partition: Annotated[
+        str,
+        cappa.Arg(
+            long=True,
+            help="Train/validation/test split preset, e.g. p70_20_10.",
+        ),
+    ] = "p70_20_10"
+
+    # Artifact controls. With no `--out`, generate prints metadata only. With
+    # `--out`, choose arrays (`npy`, `csv`, `both`) and/or static plots.
+    out: Annotated[
+        Path | None,
+        cappa.Arg(
+            long=True,
+            help="Output directory for arrays, manifest, or plots. Omit to print metadata only.",
+        ),
+    ] = None
+    array_format: Annotated[
+        ArrayRequest,
+        cappa.Arg(
+            long=True,
+            help="Array export format: none, npy, csv, or both.",
+        ),
+    ] = "none"
+    plot: Annotated[
+        PlotRequest,
+        cappa.Arg(
+            long=True,
+            help="Static figure export: none, timeseries, attractor, or both.",
+        ),
+    ] = "none"
+
+    # Reproducibility controls. Root seeds are spawned into per-draw child seeds;
+    # draw counts control the frozen bank used by exports and stochastic systems.
+    seed: Annotated[
+        int,
+        cappa.Arg(long=True, help="Root seed for trajectory/process draws."),
+    ] = 42
+    n_trajectory_draws: Annotated[
+        int,
+        cappa.Arg(long=True, help="Number of trajectory/process draws in the DGP bank."),
+    ] = 1
+    n_noise_draws: Annotated[
+        int,
+        cappa.Arg(long=True, help="Number of frozen observation-noise draws in the bank."),
+    ] = 1
+    noise_seed_base: Annotated[
+        int,
+        cappa.Arg(long=True, help="Root seed for observation-noise draws."),
+    ] = 1000
+    draw_design: Annotated[
+        DrawDesign,
+        cappa.Arg(
+            long=True,
+            help=(
+                "How exported noisy cells pair draws: auto, noise_only, joint, "
+                "trajectory_fixed, or cross_product."
+            ),
+        ),
+    ] = DrawDesign.AUTO
+    noise_kind: Annotated[
+        str,
+        cappa.Arg(long=True, help="Observation-noise law for the CLI: gaussian or laplace."),
+    ] = "gaussian"
+
+    # Plot-only options. `feature_idx` is for time-series plots; `features_idx`
+    # selects the three coordinates used by attractor plots.
+    feature_idx: Annotated[
+        int,
+        cappa.Arg(
+            long=True,
+            default=0,
+            help="Feature index used by time-series plots.",
+        ),
+    ] = 0
+    features_idx: Annotated[
+        str,
+        cappa.Arg(
+            long=True,
+            help="Comma-separated feature indices for attractor plots, e.g. 0,1,2.",
+        ),
+    ] = "0,1,2"
+    max_points: Annotated[
+        int,
+        cappa.Arg(long=True, help="Maximum points rendered in static plots."),
+    ] = 5000
+    image_format: Annotated[
+        PlotFormat,
+        cappa.Arg(long=True, help="Static plot file format: png, pdf, or svg."),
+    ] = "png"
+    dpi: Annotated[
+        int,
+        cappa.Arg(long=True, help="DPI for static plot output."),
+    ] = 300
+
+    # CLI behavior. Existing output files are protected unless `--overwrite` is
+    # set; JSON is the default because agents and shell scripts consume it well.
+    overwrite: Annotated[
+        bool,
+        cappa.Arg(long=True, help="Replace existing output files."),
+    ] = False
+    format: Annotated[
+        OutputFormat,
+        cappa.Arg(long=True, help="Output format for command metadata: text or json."),
+    ] = "json"
+    verbose: Annotated[
+        bool,
+        cappa.Arg(long=True, help="Emit library progress logs."),
+    ] = False
+
+    def __call__(self) -> None:
+        _emit_payload(
+            lambda: _generate_payload(
+                self.source,
+                shock=self.shock,
+                out=self.out,
+                seed=self.seed,
+                n_trajectory_draws=self.n_trajectory_draws,
+                n_noise_draws=self.n_noise_draws,
+                noise_seed_base=self.noise_seed_base,
+                sigma=self.sigma,
+                sigma_scale=self.sigma_scale,
+                partition_name=self.partition,
+                noise_kind=self.noise_kind,
+                array_format=self.array_format,
+                draw_design=self.draw_design,
+                plot=self.plot,
+                feature_idx=self.feature_idx,
+                features_idx=self.features_idx,
+                max_points=self.max_points,
+                image_format=self.image_format,
+                dpi=self.dpi,
+                overwrite=self.overwrite,
+                verbose=self.verbose,
+            ),
+            self.format,
+        )
+
+
+@cappa.command
+@attrs.define
 class InjectNoise:
     """Build, perturb, and split one source."""
 
@@ -815,9 +1180,9 @@ class Version:
 @cappa.command(name="serie")
 @attrs.define
 class Serie:
-    """SERIE: time-series source inspection and one-cell noise injection."""
+    """SERIE: generate, inspect, export, and visualize controlled time-series cells."""
 
-    cmd: cappa.Subcommands[Commands | List | DataDir | Inspect | InjectNoise | Export | Plot | Walkthrough | Demo | Version]
+    cmd: cappa.Subcommands[Commands | List | DataDir | Inspect | Generate | InjectNoise | Export | Plot | Walkthrough | Demo | Version]
 
 
 def main(argv: list[str] | None = None) -> None:

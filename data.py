@@ -1,12 +1,12 @@
-"""Public handoff types and loaders.
+"""Public return types and loaders — what users get back from SERIE.
+公共返回类型和加载器——用户从 SERIE 得到的对象。
 
-TimeSeriesData      — one clean series array + provenance, returned by load_data()
-SplitTimeSeriesData — one series after partition + stats, returned by inject_noise()
-load_data(source)   — dispatch: TrajectorySpec -> synthetic, KnownMeta -> recorded
-
-These are the objects that cross the boundary between SERIE internals and
-user/trainer code.  Everything a user touches after build_dgp_bank/inject_noise
-is defined here.
+TimeSeriesData      — one clean series [T, D] + provenance, from load_data()
+                      一条干净序列 [T, D] + 来源信息，来自 load_data()
+SplitTimeSeriesData — partitioned series + split stats, from inject_noise()
+                      分割后的序列 + 分割统计，来自 inject_noise()
+load_data(source)   — dispatch: TrajectorySpec → synthetic, KnownMeta → recorded
+                      分发：TrajectorySpec → 合成，KnownMeta → 录制
 """
 from __future__ import annotations
 
@@ -52,7 +52,14 @@ class KnownCleanConfig:
 
 @define(frozen=True, slots=True, eq=False)
 class TimeSeriesData:
-    """Public handoff object: one clean time series array plus provenance."""
+    """One clean time series array with provenance metadata.
+    一条带有来源元数据的干净时间序列数组。
+
+    Returned by ``load_data()``. Contains the raw values, feature names,
+    and source identity. Not yet split or noise-injected.
+    由 ``load_data()`` 返回。包含原始值、特征名和数据源标识。
+    尚未分割或注入噪声。
+    """
 
     values: np.ndarray
     feature_names: tuple[str, ...]
@@ -85,7 +92,18 @@ class TimeSeriesData:
 
 @define(frozen=True, slots=True, eq=False)
 class SplitTimeSeriesData:
-    """Public split handoff: one series plus split boundaries and split stats."""
+    """One time series after train/val/test partitioning with per-split statistics.
+    经过训练/验证/测试分割后的一条时间序列，附带各分割的统计信息。
+
+    Returned by ``inject_noise()``. Access splits via:
+    由 ``inject_noise()`` 返回。通过以下方式访问分割：
+
+        split.train_values   # [T_train, D] NumPy array
+        split.val_values     # [T_val, D]
+        split.test_values    # [T_test, D]
+        split.train_stats.mean  # [D] per-channel mean (train only, no leakage)
+        split.train_stats.std   # [D] per-channel std (train only)
+    """
 
     values: np.ndarray
     feature_names: tuple[str, ...]
@@ -110,18 +128,18 @@ class SplitTimeSeriesData:
 
     @property
     def train_values(self) -> np.ndarray:
-        t0, t1, _, _, _, _ = self.indices
-        return self.values[t0:t1]
+        train_start, train_end, _, _, _, _ = self.indices
+        return self.values[train_start:train_end]
 
     @property
     def val_values(self) -> np.ndarray:
-        _, _, v0, v1, _, _ = self.indices
-        return self.values[v0:v1]
+        _, _, val_start, val_end, _, _ = self.indices
+        return self.values[val_start:val_end]
 
     @property
     def test_values(self) -> np.ndarray:
-        _, _, _, _, s0, s1 = self.indices
-        return self.values[s0:s1]
+        _, _, _, _, test_start, test_end = self.indices
+        return self.values[test_start:test_end]
 
 
 def load_synthetic_data(

@@ -1,12 +1,14 @@
-"""Public API entry points for data-generation banks, intervention, and titration.
+"""Public API entry points for DGP (Data Generating Process) banks,
+noise injection, and experiment design.
+DGP（数据生成过程）bank、噪声注入和实验设计的公共 API 入口点。
 
-Functions:
+Functions / 函数:
     build_dgp_bank(source, seed) → DGPBank
     build_empirical_dgp_bank(values, name) → DGPBank
     inject_noise(bank, sigma, partition) → SplitTimeSeriesData
     iter_cells(bank, plan) → Iterator[TitrationCell]
-    build_clean_split_bundle(bank, trajectory_draw_ordinal, partition_spec) → DataBundle
-    build_noisy_bundle_for_cell(bank, db_clean, cell) → DataBundle
+    build_clean_split_bundle(bank, ...) → DataBundle
+    build_noisy_bundle_for_cell(bank, ...) → DataBundle
     export_dgp_bank_files(bank, out_dir) → dict
 """
 from __future__ import annotations
@@ -345,11 +347,30 @@ def build_empirical_dgp_bank(
     noise_kind: str | NoiseSampler = "gaussian",
     feature_names: tuple[str, ...] | None = None,
 ) -> DGPBank:
-    """Wrap a clean recorded series as a one-trajectory-draw DGP bank.
+    """Wrap a clean recorded [T, D] array as a one-trajectory-draw DGP bank.
+    将一个干净的录制 [T, D] 数组包装为单轨迹抽取的 DGP bank。
 
     The recording is treated as the clean reference system. Use
-    `inject_noise(..., sigma_scale="train_std")` when sigma should be relative to
-    each channel's train-set scale.
+    ``inject_noise(..., sigma_scale="train_std")`` when sigma should be
+    relative to each channel's training-set standard deviation.
+    录制数据被视为干净参考系统。当 sigma 应相对于每个通道的训练集标准差时，
+    使用 ``inject_noise(..., sigma_scale="train_std")``。
+
+    Args:
+        values: Clean time series, shape [T, D]. 干净时间序列，形状 [T, D]。
+        name: Human-readable label. 可读标签。
+        n_noise_draws: Number of frozen noise draws. 冻结噪声抽取数量。
+        noise_seed_base: Base seed for noise. 噪声基础种子。
+        noise_kind: "gaussian", "laplace", or callable. 噪声类型。
+        feature_names: Optional channel names. 可选通道名称。
+
+    Returns / 返回:
+        DGPBank with one trajectory draw and frozen noise draws.
+        包含一个轨迹抽取和冻结噪声抽取的 DGPBank。
+
+    Example / 示例:
+        >>> bank = build_empirical_dgp_bank(my_array, name="robot_gait")
+        >>> split = inject_noise(bank, sigma=0.5, sigma_scale="train_std")
     """
     data = np.asarray(values, dtype=np.float32)
     if data.ndim == 1:
@@ -592,7 +613,8 @@ def inject_noise(
     noise_draw_ordinal: int = 0,
     print_diagnostics: bool = False,
 ) -> SplitTimeSeriesData:
-    """Inject one observation-noise sigma and return train/val/test arrays."""
+    """Inject one noise dose (sigma) and return train/val/test arrays.
+    注入一个噪声剂量（sigma）并返回训练/验证/测试数组。"""
     partition = partition or PartitionSpec.p70_20_10()
     if sigma_scale == "unit":
         return _inject_noise_unit(

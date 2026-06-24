@@ -17,7 +17,7 @@ Supports:
 Shock semantics (all systems):
   - "state": perturb state += eps at shock_step (global perturbation)
   - "param": abruptly replace params, or schedule a param transition window
-  - "switch": splice two independent trajectories at shock_step
+  - "switch": replace the active trajectory with an independent trajectory at shock_step
 
 NOTE: steps is the Number of integration steps.
 Output shape is (steps + 1, dim), including initial condition.
@@ -25,15 +25,15 @@ This is consistent with e.g. Scipy integrate.solve_ivp output shape.
 
 Behavior:
 
-t_start == t_end and n_inserts=1 -> abrupt parameter replacement.
-t_start < t_end and n_inserts=k -> exactly k uniformly spaced param updates across the transition window.
+t_start == t_end and n_inserts=1 -> abrupt parameter step change.
+t_start < t_end and n_inserts=k -> exactly k uniformly spaced param updates across the stepped transition window.
 Concrete example:
 
 start_step=500, end_step=1000, n_inserts=4 gives update steps:
 [625, 750, 875, 1000]
 Usage example:
 
-event = ShockEvent.params_transition(
+event = ShockEvent.params_stepped_transition(
     params_after=after_params,
     t_start=0.35,
     t_end=0.5,
@@ -97,7 +97,7 @@ def _interpolate_scalar(before: float, after: float, alpha: float) -> float:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# parameter transition values
+# parameter stepped-transition values
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _transition_field_names(params: AttrsInstance) -> tuple[str, ...]:
@@ -233,7 +233,7 @@ class StepShockSchedule:
         end_step: int,
         n_inserts: int,
     ) -> StepShockSchedule:
-        """Compile a parameter transition window into scheduled param updates."""
+        """Compile a parameter stepped-transition window into scheduled param updates."""
         total_transition_steps = end_step - start_step
         if total_transition_steps <= 0:
             raise ValueError(
@@ -264,13 +264,13 @@ class StepShockSchedule:
 
 @attr.define(frozen=True, slots=True)
 class SwitchSpec:
-    """Two-trajectory splice at a given step.
+    """Two-trajectory switch at a given step.
 
     Semantically different from StepShockSchedule — not a perturbation
-    within one integration, but splicing two independent runs.
+    within one integration, but a cut from one independent run to another.
     """
 
-    splice_step: int  # row index where we cut
+    switch_step: int  # row index where we cut
     params_b: AttrsInstance  # system B params
     initial_cond_b: np.ndarray  # system B initial condition
     system_b: str | None = None  # if None, same system as A (same-system switch)
@@ -516,7 +516,7 @@ def _run_ks_etdrk4(
         while event_idx < len(events) and events[event_idx].step == i:
             e = events[event_idx]
             if isinstance(e, StatePerturbEvent):
-                # KS state kicks shift the whole field.
+                # KS state perturbations shift the whole field.
                 u = u + e.eps
                 v = np.fft.fft(u)
             elif isinstance(e, ParamChangeEvent):
@@ -806,7 +806,7 @@ def _generate_switch_python_pure(
     seed: int,
     sw: SwitchSpec,
 ) -> np.ndarray:
-    """Python fallback: two trajectory generations + splice."""
+    """Python fallback: two trajectory generations + trajectory switch."""
     traj_a = _generate_trajectory_pure(
         total_steps=total_steps,
         x0=x0,
@@ -835,7 +835,7 @@ def _generate_switch_python_pure(
     ).astype(np.float64)
 
     traj = traj_b.copy()
-    traj[: sw.splice_step + 1] = traj_a[: sw.splice_step + 1]
+    traj[: sw.switch_step + 1] = traj_a[: sw.switch_step + 1]
     return traj
 
 
@@ -851,7 +851,7 @@ def _generate_switch_pure(
     seed: int,
     sw: SwitchSpec,
 ) -> np.ndarray:
-    """Splice two independent trajectories at sw.splice_step."""
+    """Switch between two independent trajectories at sw.switch_step."""
     return _generate_switch_python_pure(
         total_steps=total_steps,
         x0=x0,
@@ -1036,7 +1036,7 @@ def generate_from_trajectory_spec(
                     current_params = event.params_after
             elif event.shocktype == ShockType.STATE:
                 if not event.is_instantaneous:
-                    raise ValueError("STATE shock must be instantaneous; use state_kick")
+                    raise ValueError("STATE shock must be instantaneous; use state_perturbation")
                 if not (1 <= shock_step <= total_steps):
                     raise ValueError(f"shock step {shock_step} not in [1, {total_steps}]")
                 if not (0 <= event.state_idx < dim):
@@ -1048,21 +1048,21 @@ def generate_from_trajectory_spec(
                         eps=event.eps,
                     )
                 )
-            elif event.shocktype == ShockType.SPLICE:
+            elif event.shocktype == ShockType.TRAJECTORY_SWITCH:
                 if len(trajectory_spec.shocks.events) > 1:
-                    raise ValueError("SPLICE shocks cannot be combined with other events")
+                    raise ValueError("TRAJECTORY_SWITCH shocks cannot be combined with other events")
                 if not event.is_instantaneous:
-                    raise ValueError("SPLICE shock must be instantaneous")
+                    raise ValueError("TRAJECTORY_SWITCH shock must be instantaneous")
                 if not (0 <= shock_step <= total_steps):
-                    raise ValueError(f"splice_step {shock_step} not in [0, {total_steps}]")
+                    raise ValueError(f"switch_step {shock_step} not in [0, {total_steps}]")
                 if event.ic_b is None:
-                    raise ValueError("SPLICE shock requires ic_b")
+                    raise ValueError("TRAJECTORY_SWITCH shock requires ic_b")
                 ic_b = np.array(event.ic_b, dtype=np.float64)
                 if ic_b.size != dim:
-                    raise ValueError(f"splice ic_b must have size {dim}; got {ic_b.size}")
+                    raise ValueError(f"trajectory switch ic_b must have size {dim}; got {ic_b.size}")
                 p_b = event.params_after if event.params_after is not None else params_obj
                 switch = SwitchSpec(
-                    splice_step=shock_step,
+                    switch_step=shock_step,
                     params_b=p_b,
                     initial_cond_b=ic_b,
                     system_b=None,

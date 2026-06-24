@@ -168,38 +168,41 @@ serie <subcommand> <source> --option value
 例如：
 
 ```bash
-serie inject-noise ou --sigma 0.1 --format json
+serie generate lorenz --shock param --sigma 0.1 --format json
 ```
 
 读作：
 
 - `serie`：运行 SERIE CLI；
-- `inject-noise`：选择“注入噪声并切分”的子命令；
-- `ou`：使用 Ornstein-Uhlenbeck 数据源；
-- `--sigma 0.1`：噪声剂量；
+- `generate`：生成一个 SERIE dataset cell；
+- `lorenz`：使用 Lorenz source；
+- `--shock param`：使用内置参数冲击干预；
+- `--sigma 0.1`：观测噪声剂量；
 - `--format json`：输出 JSON，方便人和脚本读取。
 
-第一次安装后，建议按顺序跑这几条：
+第一次安装后，先跑这三条：
+
+```bash
+serie list
+serie demo lorenz --out tmp/lorenz_demo.html
+serie generate lorenz --sigma 0.1 --format json
+```
+
+它们分别做三件事：
+
+1. 看看有哪些内置 source；
+2. 生成一个离线交互式 Lorenz attractor HTML；
+3. 生成一个 dataset cell，并返回 train/validation/test 切分元信息。
+
+如果你想做完整安装检查，再跑：
 
 ```bash
 serie commands --format json
-serie list --format json
 serie data-dir --format json
 serie inspect ou --format json
-serie inject-noise ou --sigma 0.1 --partition p70_20_10 --format json
+serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz_cell --array-format both --plot both --overwrite --format json
 serie walkthrough --out tmp/walkthrough --array-format both --overwrite --format json
-serie demo lorenz --out tmp/lorenz_demo.html
 ```
-
-它们分别检查：
-
-1. CLI 有哪些命令；
-2. 内置 source 名字有哪些；
-3. 外部数据集目录在哪里；
-4. 能否生成一个 source 并打印元信息；
-5. 能否注入一个噪声剂量并切分数据；
-6. 能否导出数组、CSV、manifest 和图；
-7. 能否生成一个离线交互式 attractor HTML。
 
 ## 常用 CLI
 
@@ -225,43 +228,25 @@ serie inspect lorenz_param_shock --format json
 
 输出会包含形状、特征名、trajectory/noise draw 数量、根种子、child seeds、是否 stochastic 等信息。
 
-### 注入一个噪声剂量
+### 生成一个 SERIE cell
 
 ```bash
-serie inject-noise lorenz --sigma 0.25 --format json
-serie inject-noise ou --sigma 1.0 --sigma-scale train_std --format json
+serie generate lorenz --sigma 0.25 --format json
+serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz_cell --array-format csv --plot both --format json
+serie generate ou --sigma 1.0 --sigma-scale train_std --format json
 ```
 
-`--sigma-scale unit` 表示直接使用 `sigma`。`--sigma-scale train_std` 表示按训练段每个通道的标准差缩放噪声，适合不同通道有不同物理单位的真实记录。
+`generate` 是主要 CLI：它会生成 source，按需要加入干预，注入观测噪声，切分 train/validation/test，并且可以选择写出数组和图。
 
-### 导出数组和 manifest
+- `--shock none|param|state|switch`：选择干预类型。比如 `lorenz --shock param` 会解析成 `lorenz_param_shock`。
+- `--sigma`：观测噪声剂量。
+- `--sigma-scale unit`：直接使用 `sigma`。
+- `--sigma-scale train_std`：按训练段每个通道的标准差缩放噪声，适合不同通道有不同物理单位的真实记录。这个模式目前用于切分元信息；如果要同时写数组或图，请使用 `--sigma-scale unit`。
+- `--out`：写文件的目录。不传 `--out` 时只打印 JSON 元信息。
+- `--array-format none|npy|csv|both`：写出数组和 `manifest.json`。
+- `--plot none|timeseries|attractor|both`：写出静态图。
 
-```bash
-serie export lorenz --out tmp/lorenz_export --sigma 0.1 --array-format both --format json
-```
-
-会写出：
-
-- `clean.npy` / `clean.csv`
-- `noise_draws.npy` / `noise_draws.csv`
-- 可选的 noisy 序列
-- `manifest.json`
-
-这是给人检查、给其他工具读取、或给审稿人复验用的路径。正常 Python API 默认在内存里工作。
-
-### 画图
-
-```bash
-serie plot lorenz --out tmp/lorenz.png --kind both --sigma 0.1 --format json
-```
-
-`--kind` 可以是：
-
-- `timeseries`
-- `attractor`
-- `both`
-
-对带干预的 source，time-series 图会标出 shock 时间；如果有 no-intervention reference，也会在冲击后画出对照线。
+旧的 `inject-noise`、`export`、`plot` 子命令仍然保留，主要用于兼容和底层检查；新用户从 `generate` 开始即可。
 
 ### 生成交互式 HTML demo
 
@@ -321,17 +306,25 @@ SERIE 内置噪声默认是 unit variance，这样 `sigma` 可以直接理解为
 ### 干预
 
 ```python
+from attrs import evolve
 from serie import ShockEvent, ShockSchedule, TrajectorySpec, build_dgp_bank
 
-shock = ShockSchedule.single(
-    ShockEvent.params_replace(fraction=0.6, values={"rho": 35.0})
+base = TrajectorySpec.lorenz()
+source = evolve(
+    base,
+    shocks=ShockSchedule.single(
+        ShockEvent.params_step_change(
+            params_after=evolve(base.params, rho=35.0),
+            t_start=0.60,
+        )
+    ),
 )
-
-spec = TrajectorySpec.lorenz(shock=shock)
-bank = build_dgp_bank(spec, seed=42)
+bank = build_dgp_bank(source, seed=42)
 ```
 
-v1 支持单个明确干预事件。这个限制是有意的：一次只改一个已声明的事件，模型失败时更容易归因。需要周期性机制切换时，应该使用对应的 stochastic/base source，而不是把很多 shock 混在一个 schedule 里。
+SERIE 支持多个按时间排序的参数干预和状态干预；例如可以先做
+`params_stepped_transition(...)`，再做 `state_perturbation(...)`。`trajectory_switch(...)`
+仍然保持单事件，因为 trajectory switch 是在两条独立生成的轨迹之间切换，不是在同一条积分轨迹里原地扰动。
 
 ### 种子和 draw ordinal
 

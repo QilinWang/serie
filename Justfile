@@ -22,10 +22,10 @@ cli-data-dir:
 cli-inspect source="ou":
     UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie inspect {{source}} --format json
 
-# Author CLI check: inject sigma noise and split train/val/test.
+# Author CLI check: generate one cell and split train/val/test.
 [group("01 author-cli")]
-cli-inject-noise source="ou" sigma="0.1":
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie inject-noise {{source}} --sigma {{sigma}} --partition p70_20_10 --format json
+cli-generate source="ou" sigma="0.1" shock="none":
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie generate {{source}} --shock {{shock}} --sigma {{sigma}} --partition p70_20_10 --format json
 
 # High-level walkthrough: run the installed CLI end-to-end under tmp/.
 [group("02 author-walkthrough")]
@@ -73,7 +73,7 @@ release-check tmp="tmp/release_check":
     uv pip install --python {{tmp}}/.venv/bin/python dist/serie-{{version}}-py3-none-any.whl
     {{tmp}}/.venv/bin/serie version
     {{tmp}}/.venv/bin/serie inspect lorenz --format json
-    {{tmp}}/.venv/bin/serie export lorenz --out {{tmp}}/export --sigma 0.1 --format json
+    {{tmp}}/.venv/bin/serie generate lorenz --out {{tmp}}/export --sigma 0.1 --array-format both --format json
     {{tmp}}/.venv/bin/serie walkthrough --out {{tmp}}/walkthrough --overwrite --format json
     just release-check-files {{tmp}}
     just clean-release-check {{tmp}}

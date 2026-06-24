@@ -41,8 +41,8 @@ domain specialist, or a model trained to know that domain's failure modes:
 
 - **Design the regime change you actually fear.** SERIE doesn't hand you a fixed
   menu of shocks — you specify the intervention yourself: which parameter drifts
-  and by how much, whether the state takes a sudden kick or a whole new regime is
-  spliced in, and the exact moment it strikes. That is where your domain knowledge
+  and by how much, whether the state takes a sudden perturbation or the trajectory
+  switches into a new regime, and the exact moment it strikes. That is where your domain knowledge
   enters. A quant encodes the volatility spike or correlation breakdown that has
   burned the desk before; a controls engineer encodes the actuator fault; a grid
   operator encodes the load shock that follows a heatwave. The stress is no longer
@@ -247,15 +247,16 @@ serie <command> <positional-arguments> --option value --flag
 For example:
 
 ```bash
-serie inject-noise ou --sigma 0.1 --format json
+serie generate lorenz --shock param --sigma 0.1 --format json
 ```
 
 Read that as:
 
 - `serie`: run the installed SERIE command.
-- `inject-noise`: choose the subcommand.
-- `ou`: the source name.
-- `--sigma 0.1`: set the noise dose.
+- `generate`: generate one SERIE dataset cell.
+- `lorenz`: the source name.
+- `--shock param`: use the built-in parameter-shift intervention preset.
+- `--sigma 0.1`: set the observation-noise dose.
 - `--format json`: print machine-readable output for humans, scripts, and
   agents.
 
@@ -272,252 +273,97 @@ serie commands --format json
 For detailed options on one command, use normal CLI help:
 
 ```bash
-serie inject-noise --help
+serie generate --help
 ```
 
-### First Run
+### First Run: See It Work
 
-Run these seven commands in order when you first install SERIE:
+Start with three commands. They show the available sources, create an
+interactive visual demo, and generate one train/validation/test split:
+
+```bash
+serie list
+serie demo lorenz --out tmp/lorenz_demo.html
+serie generate lorenz --sigma 0.1 --format json
+```
+
+Read that as:
+
+1. `serie list`: see which built-in sources are available.
+2. `serie demo lorenz ...`: write one offline HTML file with a draggable Lorenz
+   attractor and a live noise slider.
+3. `serie generate lorenz ...`: generate one dataset cell and return
+   train/validation/test split metadata.
+
+Once those work, use the command-specific sections below.
+
+### Full Verification Walkthrough
+
+For a fuller install audit, run these commands in order:
 
 ```bash
 serie commands --format json
 serie list --format json
 serie data-dir --format json
 serie inspect ou --format json
-serie inject-noise ou --sigma 0.1 --partition p70_20_10 --format json
+serie generate ou --sigma 0.1 --partition p70_20_10 --format json
+serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz_cell --array-format both --plot both --overwrite --format json
 serie walkthrough --out tmp/walkthrough --array-format both --overwrite --format json
-serie demo lorenz --out tmp/lorenz_demo.html
+serie demo lorenz --out tmp/lorenz_demo.html --overwrite
 ```
 
-They answer seven questions:
+This answers eight questions:
 
 1. What commands does SERIE expose?
 2. What source names does SERIE know?
 3. Where should external dataset files live?
 4. Can SERIE generate one clean source and report its metadata?
-5. Can SERIE inject one noise dose and split the series?
-6. Can SERIE write inspectable arrays, CSVs, manifests, and figures?
-7. Can SERIE write one offline interactive attractor demo?
+5. Can SERIE generate one cell and split the series?
+6. Can one command combine intervention, noise, arrays, and figures?
+7. Can SERIE write the standard audit walkthrough?
+8. Can SERIE write one offline interactive attractor demo?
 
-### List CLI Commands
+### Command Reference
 
-```bash
-serie commands
-serie commands --format json
-```
+| Command | What it does |
+|---------|-------------|
+| `serie commands` | List all CLI commands with examples |
+| `serie list` | List available source names (synthetic + known) |
+| `serie data-dir` | Show where external dataset files should live |
+| `serie inspect <source>` | Build one source and print its metadata |
+| `serie generate <source>` | The main workflow: source + intervention + noise + split + optional files |
+| `serie demo <source>` | Write a self-contained interactive HTML with 3D attractor + noise slider |
+| `serie walkthrough` | Full end-to-end audit: arrays, manifests, and figures for two sources |
 
-This is the CLI equivalent of a small command index. The text form groups the
-commands by task; the JSON form is stable enough for scripts and coding agents.
-Use `serie --help` for Cappa's full command list, and
-`serie <command> --help` for one command's options.
+Add `--format json` to any command for machine-readable output. Use
+`serie <command> --help` for full options.
 
-### List Sources
-
-```bash
-serie list --format json
-```
-
-Lists the built-in source names. The output separates synthetic sources from
-known recorded datasets. Start here when you do not remember whether the source
-is called `lorenz`, `lorenz_param_shock`, `ou`, `etth1`, and so on.
-
-Expected result: JSON containing `synthetic` and `known` source-name lists.
-
-### Find the Dataset Directory
+**`generate`** is the command most users need. Examples:
 
 ```bash
-serie data-dir --format json
+serie generate lorenz --sigma 0.1 --format json
+serie generate lorenz --shock param --sigma 0.1 --format json
+serie generate lorenz --sigma 0.1 --out tmp/cell --array-format both --plot both --overwrite --format json
 ```
 
-Prints where SERIE will look for external dataset files. The wheel does not
-bundle large recordings, so recorded datasets resolve under `SERIE_KNOWN_ROOT`
-or the default cache directory. This command is useful before trying ETT or
-HuGaDB.
+Key options: `--shock none|param|state|switch` for built-in interventions,
+`--sigma` for noise dose, `--sigma-scale unit|train_std` for scaling mode,
+`--partition` for split convention, `--out` for artifact directory,
+`--array-format` and `--plot` for file outputs.
 
-Expected result: JSON with a `data_dir` path and an `exists` flag.
-
-### Inspect One Source
-
-```bash
-serie inspect ou --format json
-```
-
-Builds one source and prints its metadata: source name, shape, feature names,
-root seeds, spawned child seeds, and noise law. You can pass any catalog name:
-
-```bash
-serie inspect lorenz --format json
-serie inspect lorenz_param_shock --format json
-```
-
-Expected result: JSON with fields such as `T`, `D`, `n_trajectory_draws`,
-`n_noise_draws`, `is_stochastic`, `trajectory_seed_base`, `trajectory_draw_seeds`,
-`noise_seed_base`, and `noise_draw_seeds`.
-
-### Inject Noise Into One Source
-
-```bash
-serie inject-noise ou --sigma 0.1 --partition p70_20_10 --format json
-```
-
-Generates one clean source, applies one noise dose, splits the
-series into train/validation/test partitions, and prints the resulting shapes
-and train statistics.
-
-- `source`: which source to generate, default `ou`.
-- `--sigma`: noise dose.
-- `--partition`: split convention.
-- `--sigma-scale unit`: use `sigma` directly.
-- `--sigma-scale train_std`: scale noise per channel by the clean train-split
-  standard deviation.
-
-Examples:
-
-```bash
-serie inject-noise ou --sigma 0.1 --format json
-serie inject-noise lorenz --sigma 0.25 --format json
-serie inject-noise ou --sigma 1.0 --sigma-scale train_std --format json
-```
-
-Expected result: JSON showing the full/train/val/test shapes and the first few
-train-set mean/std entries.
-
-### Export Arrays for Inspection
-
-```bash
-serie export lorenz --out tmp/lorenz_export --sigma 0.1 --array-format both --format json
-```
-
-`serie export` is an explicit verification path. It writes `clean.npy` /
-`clean.csv`, `noise_draws.npy` / `noise_draws.csv`, optional `noisy/*`, and
-`manifest.json` for one DGP bank. Normal `build_dgp_bank(...)` remains
-memory-only. Use `--array-format npy`, `--array-format csv`, or
-`--array-format both`.
-
-Use export when you want to inspect the generated sequences outside Python,
-hand them to another tool, or show a reviewer the exact arrays behind a run.
-Noisy exports follow the same draw design as `TitrationPlan`: auto mode
-pairs trajectory and noise draws for stochastic sources, while deterministic
-sources use one clean trajectory path with the requested noise draws.
-Pass `--draw-design cross_product` only when the full trajectory × noise
-grid is the experiment.
-
-### Plot Generated Sources
-
-```bash
-serie plot lorenz --out tmp/lorenz.png --kind timeseries --sigma 0.1
-serie plot lorenz --out tmp/lorenz.png --kind both --sigma 0.1 --format json
-```
-
-`serie plot` renders generated sources, not model predictions. `--kind` selects
-the figure family:
-
-- `timeseries`: one channel over time, clean source in blue and optional noisy
-  source in orange.
-- `attractor`: phase-space view for sources with at least two channels. Two
-  channel sources are drawn in the zero z-plane; one-channel sources are
-  timeseries-only.
-- `both`: write both figures. If `--out figure.png` is passed, outputs are
-  `figure_timeseries.png` and `figure_attractor.png`.
-
-Timeseries plots mark intervention times with a vertical shock line. The label
-is placed near the top or bottom of the panel depending on the local data, so it
-does not cover the trajectory. For intervention sources, the time-series figure
-also overlays the no-intervention reference after the first shock. At
-`sigma=0`, that overlay compares intervened clean against no-intervention clean.
-At `sigma>0`, it compares intervened noisy against no-intervention noisy using
-the same frozen noise draw. The two post-shock counterfactual lines
-use the same red family, with the no-intervention reference drawn as a dashed
-lower-alpha line.
-
-### Write an Interactive HTML Demo
+**`demo`** writes a single HTML file — open it in a browser, drag the 3D
+attractor, slide the noise. Supported sources: `lorenz`, `rossler`, `chua`.
 
 ```bash
 serie demo lorenz --out tmp/lorenz_demo.html
-serie demo rossler --out tmp/rossler_demo.html --n-draws 1 --overwrite
-serie demo chua --out tmp/chua_demo.html --n-points 500 --overwrite
 ```
 
-`serie demo` writes a single self-contained HTML file. Open it in a browser and
-drag the 3D attractor; the slider applies observation noise live as
-`clean + sigma * draw`. No JavaScript toolchain is needed at user runtime. The
-installed package ships the pre-built viewer template, and Python injects fresh
-SERIE-generated data into that template.
-
-Supported demo sources are `lorenz`, `rossler`, and `chua`. The default is
-`--n-points 4000` and `--n-draws 5`: enough points for a recognizable attractor
-while keeping the HTML file small. Use thousands of points for visual judgment;
-very small values such as `--n-points 120` are only quick command checks and
-will render Lorenz as a jagged chord tangle instead of a butterfly. Increase
-`--n-draws` when you want more frozen noise realizations in the selector.
-Existing files are not replaced unless you pass `--overwrite`.
-
-For a public demo gallery, generate the HTML files as release or static-site
-artifacts, not as package data:
+**`walkthrough`** is the full package verification — it writes arrays, CSVs,
+manifests, and figures for both a regular and parameter-shifted Lorenz source.
 
 ```bash
-serie demo lorenz --out release_artifacts/serie_demo_html/lorenz.html --n-points 4000 --n-draws 30 --overwrite
-serie demo rossler --out release_artifacts/serie_demo_html/rossler.html --n-points 4000 --n-draws 30 --overwrite
-serie demo chua --out release_artifacts/serie_demo_html/chua.html --n-points 4000 --n-draws 30 --overwrite
+serie walkthrough --out tmp/walkthrough --overwrite --format json
 ```
-
-Those generated HTML files are meant for a GitHub Release, static gallery, or
-manual sharing. They are intentionally not bundled into the PyPI wheel.
-
-### Full Walkthrough
-
-```bash
-serie walkthrough --out tmp/walkthrough --array-format both --overwrite --format json
-```
-
-Runs the standard end-to-end installed-package example. It prepares two
-sources:
-
-- `lorenz`: regular clean Lorenz trajectory.
-- `lorenz_param_shock`: Lorenz trajectory with a parameter shift at the declared
-  shock time.
-
-For both sources it writes:
-
-- `clean.npy` and `clean.csv`
-- `noise_draws.npy` and `noise_draws.csv`
-- one `noisy/*` file for the configured `sigma`
-- `manifest.json`
-
-It also renders four visual cases:
-
-- `regular`
-- `regular_noise`
-- `param_shift`
-- `param_shift_noise`
-
-Each visual case writes both a time-series figure and an attractor figure.
-The parameter-shift time-series figures include the no-intervention Lorenz
-reference after the shock marker, so the walkthrough shows both the intervention
-effect and the noise effect in one generated folder.
-
-Default output:
-
-```text
-tmp/walkthrough/
-```
-
-Expected result: JSON listing every file it wrote and whether each exists.
-
-### Source Checkouts
-
-If you are editing SERIE from a source checkout, run the same CLI through the
-local package:
-
-```bash
-cd serie
-uv run --no-project --with-editable . serie inspect ou --format json
-```
-
-This checkout may also have a local ignored `serie/.justfile` for contributor
-chores such as tests, release checks, publishing, and cleanup. That recipe file
-is personal source automation, not the public API, and it is excluded from git
-and package release artifacts.
 
 ## Python API
 
@@ -616,7 +462,7 @@ base = TrajectorySpec.lorenz()
 source = evolve(
     base,
     shocks=ShockSchedule.single(
-        ShockEvent.state_kick(state_idx=0, eps=0.9, t_start=0.35)
+        ShockEvent.state_perturbation(state_idx=0, eps=0.9, t_start=0.35)
     ),
 )
 bank = build_dgp_bank(source, seed=42)
@@ -629,16 +475,22 @@ time-ordered parameter/state interventions inside one clean trajectory:
 source = evolve(
     base,
     shocks=ShockSchedule.multiple(
-        ShockEvent.param_shift(param="rho", delta=4.0, t_start=0.30),
-        ShockEvent.state_kick(state_idx=0, eps=0.9, t_start=0.60),
+        ShockEvent.params_stepped_transition(
+            params_after=evolve(base.params, rho=32.0),
+            t_start=0.30,
+            t_end=0.45,
+            n_inserts=4,
+        ),
+        ShockEvent.state_perturbation(state_idx=0, eps=0.9, t_start=0.60),
     ),
 )
 ```
 
-SERIE sorts the events by time and applies each event when the integration
-reaches its declared fraction of the usable trajectory. Splice events remain
-single-event because a splice cuts between independently generated trajectories
-instead of perturbing one integration in place.
+SERIE requires events to be declared in time order and applies each event when
+the integration reaches its declared fraction of the usable trajectory.
+Trajectory switch events remain single-event because they cut between
+independently generated trajectories instead of perturbing one integration in
+place.
 
 ### Seed Provenance
 
@@ -755,8 +607,8 @@ The default wheel ships one small prebuilt offline viewer template:
 inspection artifact. That template is the only bundled frontend artifact. The
 wheel does not bundle dashboards, `node_modules`, generated demo data, large
 known datasets, generated arrays, model checkpoints, prediction windows,
-reports, or run folders. User-requested exports from `serie export` or
-`export_dgp_bank_files(...)` are local verification artifacts owned by the
+reports, or run folders. User-requested artifacts from `serie generate --out`
+or `export_dgp_bank_files(...)` are local verification artifacts owned by the
 caller.
 
 ## Known Datasets
