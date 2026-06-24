@@ -24,6 +24,7 @@ import pytest
 
 from serie import (
     PROTOCOL_VERSION,
+    DGPBank,
     TitrationCell,
     PartitionSpec,
     DrawDesign,
@@ -423,6 +424,30 @@ class TestErrorContracts:
 
 
 class TestProvenance:
+    def test_bank_rejects_seed_provenance_drift(self):
+        clean = np.zeros((1, 8, 2), dtype=np.float32)
+        noise_draws = np.zeros((1, 8, 2), dtype=np.float32)
+        with pytest.raises(ValueError, match="trajectory_draw_seeds"):
+            DGPBank(
+                name="bad",
+                trajectory_seed_base=7,
+                noise_seed_base=1000,
+                trajectory_draw_seeds=(8,),
+                noise_draw_seeds=spawn_draw_seeds(1000, 1),
+                clean=clean,
+                noise_draws=noise_draws,
+                feature_names=("x", "y"),
+            )
+
+    def test_bank_rejects_out_of_range_draw_ordinals(self):
+        bank = build_dgp_bank(
+            small_ou(), seed=0, n_trajectory_draws=2, n_noise_draws=2, verbose=False
+        )
+        with pytest.raises(IndexError, match="trajectory_draw_ordinal"):
+            bank.build_observed_series(noise_level=0.1, trajectory_draw_ordinal=2)
+        with pytest.raises(IndexError, match="noise_draw_ordinal"):
+            bank.build_observed_series(noise_level=0.1, noise_draw_ordinal=2)
+
     def test_titration_cell_records_the_cell(self):
         bank = build_dgp_bank(small_lorenz(), seed=5, n_noise_draws=2, verbose=False)
         cell = bank.cell(noise_level=0.25, trajectory_draw_ordinal=0, noise_draw_ordinal=1)
@@ -564,6 +589,17 @@ class TestProvenance:
         with pytest.raises(FileExistsError):
             export_dgp_bank_files(bank, out)
 
+    def test_public_metadata_is_immutable(self):
+        bank = build_dgp_bank(small_lorenz(), seed=0, verbose=False)
+        split = inject_noise(bank, sigma=0.1, partition=PartitionSpec.p70_20_10())
+        with pytest.raises(TypeError):
+            split.metadata["sigma"] = 999.0
+
+        loaded = build_empirical_dgp_bank(np.ones((20, 2), dtype=np.float32), name="recording")
+        split = inject_noise(loaded, sigma=0.0)
+        with pytest.raises(TypeError):
+            split.metadata["source_name"] = "mutated"
+
     def test_param_shift_matches_regular_before_shock_then_diverges(self):
         base = small_lorenz(steps=600)
         shifted = evolve(
@@ -618,3 +654,63 @@ class TestProvenance:
                 ShockEvent.trajectory_switch(ic_b=(0.1, 0.2, 0.3), t_start=0.5),
                 ShockEvent.state_perturbation(state_idx=0, eps=0.1, t_start=0.8),
             )
+
+
+class TestPlanValidation:
+    def test_plan_rejects_empty_noise_levels(self):
+        with pytest.raises(ValueError, match="noise_levels"):
+            TitrationPlan(noise_levels=())
+
+    def test_plan_rejects_zero_draw_counts(self):
+        with pytest.raises(ValueError):
+            TitrationPlan(n_trajectory_draws=0)
+        with pytest.raises(ValueError):
+            TitrationPlan(n_noise_draws=0)
+
+    def test_plan_accepts_string_draw_design(self):
+        plan = TitrationPlan(draw_design="cross_product", n_trajectory_draws=2, n_noise_draws=3)
+        assert plan.draw_design is DrawDesign.CROSS_PRODUCT
+        assert plan.cell_count_per_sigma(is_stochastic=False) == 6
+
+    def test_plan_cell_count_matches_resolved_design(self):
+        deterministic = TitrationPlan(n_trajectory_draws=1, n_noise_draws=4)
+        stochastic = TitrationPlan(n_trajectory_draws=3, n_noise_draws=3)
+        assert deterministic.cell_count_per_sigma(is_stochastic=False) == 4
+        assert stochastic.cell_count_per_sigma(is_stochastic=True) == 3
+
+    def test_plan_rejects_bank_with_too_few_draws(self):
+        bank = build_dgp_bank(small_lorenz(), n_trajectory_draws=1, n_noise_draws=1, verbose=False)
+        plan = TitrationPlan(
+            noise_levels=(0.0,),
+            n_trajectory_draws=1,
+            n_noise_draws=2,
+            draw_design=DrawDesign.NOISE_ONLY,
+        )
+        with pytest.raises(ValueError, match="noise draws"):
+            list(iter_cells(bank, plan))
+
+
+class TestStageOrder:
+    def test_train_std_noise_uses_clean_train_stats_then_recomputes_stats(self):
+        values = np.stack(
+            [
+                np.linspace(0.0, 10.0, 40, dtype=np.float32),
+                np.linspace(0.0, 100.0, 40, dtype=np.float32),
+            ],
+            axis=1,
+        )
+        bank = build_empirical_dgp_bank(values, name="scaled", noise_seed_base=7)
+        partition = PartitionSpec.p70_20_10()
+        clean = inject_noise(bank, sigma=0.0, partition=partition)
+        noisy = inject_noise(bank, sigma=1.0, sigma_scale="train_std", partition=partition)
+
+        draw = bank.noise_draws[0][: clean.train_values.shape[0]]
+        expected_train = clean.train_values + clean.train_stats.std[None, :] * draw
+        np.testing.assert_allclose(noisy.train_values, expected_train, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            noisy.train_stats.mean,
+            noisy.train_values.mean(axis=0),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        assert not np.allclose(noisy.train_stats.mean, clean.train_stats.mean)
