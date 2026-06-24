@@ -13,9 +13,10 @@ def test_cli_commands_json_is_agent_readable(capsys):
     commands = {row["command"]: row for row in payload["commands"]}
     assert "serie --help" == payload["help"]["all_commands"]
     assert "serie <command> --help" == payload["help"]["one_command"]
-    assert commands["inject-noise"]["group"] == "03 generate"
-    assert "sigma" in commands["inject-noise"]["example"]
-    assert commands["plot"]["group"] == "04 visualize"
+    assert commands["generate"]["group"] == "02 generate"
+    assert "sigma" in commands["generate"]["example"]
+    assert "shock" in commands["generate"]["example"]
+    assert commands["demo"]["group"] == "03 visualize"
 
 
 def test_cli_commands_text_groups_commands(capsys):
@@ -23,8 +24,8 @@ def test_cli_commands_text_groups_commands(capsys):
     out = capsys.readouterr().out
     assert "[01 discovery]" in out
     assert "commands: List SERIE CLI commands with examples." in out
-    assert "[03 generate]" in out
-    assert "inject-noise: Build one DGP bank" in out
+    assert "[02 generate]" in out
+    assert "generate: Generate one SERIE cell" in out
     assert "Help:" in out
 
 
@@ -74,6 +75,64 @@ def test_cli_inject_noise_train_std_json_is_parseable(capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["sigma"] == 1.0
     assert payload["sigma_scale"] == "train_std"
+
+
+def test_cli_generate_prints_one_cell_json(capsys):
+    cli.main(["generate", "ou", "--sigma", "0.1", "--array-format", "none", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "ou"
+    assert payload["shock"] == "none"
+    assert payload["sigma"] == 0.1
+    assert payload["artifacts"] is None
+
+
+def test_cli_generate_writes_arrays_and_plot_for_shock(tmp_path, capsys):
+    pytest.importorskip("matplotlib")
+    out = tmp_path / "generated"
+    cli.main([
+        "generate",
+        "lorenz",
+        "--shock",
+        "param",
+        "--sigma",
+        "0.1",
+        "--out",
+        str(out),
+        "--array-format",
+        "csv",
+        "--plot",
+        "timeseries",
+        "--max-points",
+        "200",
+        "--format",
+        "json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "lorenz_param_shock"
+    assert payload["name"] == "lorenz_param_shock"
+    assert payload["shock"] == "param"
+    assert payload["artifacts"]["arrays"]["array_format"] == "csv"
+    assert payload["artifacts"]["plots"]["timeseries"]
+    assert (out / "clean.csv").exists()
+    assert (out / "noise_draws.csv").exists()
+    assert (out / "manifest.json").exists()
+    assert (out / "lorenz_param_shock_timeseries.png").exists()
+
+
+def test_cli_generate_rejects_train_std_artifact_writes(tmp_path):
+    with pytest.raises(SystemExit, match="File exports and plots currently require --sigma-scale unit"):
+        cli.main([
+            "generate",
+            "ou",
+            "--sigma",
+            "1.0",
+            "--sigma-scale",
+            "train_std",
+            "--out",
+            str(tmp_path / "cell"),
+            "--array-format",
+            "csv",
+        ])
 
 
 def test_cli_export_writes_npys_and_manifest(tmp_path, capsys):

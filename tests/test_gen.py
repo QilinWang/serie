@@ -224,13 +224,13 @@ class TestPythonShock:
         np.testing.assert_array_equal(baseline[:shock_step], shocked[:shock_step])
         assert np.max(np.abs(baseline[shock_step + 1:] - shocked[shock_step + 1:])) > 1.0
 
-    def test_public_multi_state_schedule_applies_both_kicks(self):
+    def test_public_multi_state_schedule_applies_both_perturbations(self):
         base = TrajectorySpec.lorenz(steps=500, burn_in=0)
         source = evolve(
             base,
             shocks=ShockSchedule.multiple(
-                ShockEvent.state_kick(state_idx=0, eps=0.5, t_start=0.2),
-                ShockEvent.state_kick(state_idx=1, eps=-0.75, t_start=0.6),
+                ShockEvent.state_perturbation(state_idx=0, eps=0.5, t_start=0.2),
+                ShockEvent.state_perturbation(state_idx=1, eps=-0.75, t_start=0.6),
             ),
         )
 

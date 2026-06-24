@@ -382,15 +382,15 @@ class TestPartition:
 class TestPartitionValidation:
     def test_overlapping_val_test_rejected(self):
         with pytest.raises(ValueError, match="bounds invalid"):
-            PartitionSpec(t0=0.0, t1=0.7, v0=0.6, v1=0.9, s0=0.85, s1=1.0)
+            PartitionSpec(train_start=0.0, train_end=0.7, val_start=0.6, val_end=0.9, test_start=0.85, test_end=1.0)
 
     def test_fraction_outside_unit_interval_rejected(self):
         with pytest.raises(ValueError):
-            PartitionSpec(t0=0.0, t1=1.5, v0=1.5, v1=1.6, s0=1.6, s1=2.0)
+            PartitionSpec(train_start=0.0, train_end=1.5, val_start=1.5, val_end=1.6, test_start=1.6, test_end=2.0)
 
     def test_empty_train_rejected(self):
         with pytest.raises(ValueError, match="Train bounds"):
-            PartitionSpec(t0=0.5, t1=0.5, v0=0.5, v1=0.8, s0=0.8, s1=1.0)
+            PartitionSpec(train_start=0.5, train_end=0.5, val_start=0.5, val_end=0.8, test_start=0.8, test_end=1.0)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -569,7 +569,7 @@ class TestProvenance:
         shifted = evolve(
             base,
             shocks=ShockSchedule.single(
-                ShockEvent.params_replace(
+                ShockEvent.params_step_change(
                     params_after=LorenzParams(sigma=10.1, rho=28.1, beta=8.1 / 3.0),
                     t_start=0.35,
                 )
@@ -593,14 +593,14 @@ class TestProvenance:
         assert post_mean_abs > 1e-3
 
     def test_public_shock_types_are_exported(self):
-        event = ShockEvent.state_kick(state_idx=0, eps=0.1, t_start=0.5)
+        event = ShockEvent.state_perturbation(state_idx=0, eps=0.1, t_start=0.5)
         schedule = ShockSchedule.single(event)
         assert schedule.n_shocks == 1
 
     def test_public_schedule_accepts_multiple_param_or_state_events(self):
         schedule = ShockSchedule.multiple(
-            ShockEvent.state_kick(state_idx=0, eps=0.1, t_start=0.2),
-            ShockEvent.state_kick(state_idx=1, eps=-0.2, t_start=0.8),
+            ShockEvent.state_perturbation(state_idx=0, eps=0.1, t_start=0.2),
+            ShockEvent.state_perturbation(state_idx=1, eps=-0.2, t_start=0.8),
         )
         assert schedule.n_shocks == 2
         assert schedule.shock_times == (0.2, 0.8)
@@ -608,13 +608,13 @@ class TestProvenance:
     def test_public_schedule_rejects_unsorted_events(self):
         with pytest.raises(ValueError, match="time-ordered"):
             ShockSchedule.multiple(
-                ShockEvent.state_kick(state_idx=0, eps=0.1, t_start=0.8),
-                ShockEvent.state_kick(state_idx=1, eps=-0.2, t_start=0.2),
+                ShockEvent.state_perturbation(state_idx=0, eps=0.1, t_start=0.8),
+                ShockEvent.state_perturbation(state_idx=1, eps=-0.2, t_start=0.2),
             )
 
-    def test_public_schedule_rejects_splice_with_other_events(self):
-        with pytest.raises(ValueError, match="SPLICE"):
+    def test_public_schedule_rejects_trajectory_switch_with_other_events(self):
+        with pytest.raises(ValueError, match="TRAJECTORY_SWITCH"):
             ShockSchedule.multiple(
-                ShockEvent.trajectory_splice(ic_b=(0.1, 0.2, 0.3), t_start=0.5),
-                ShockEvent.state_kick(state_idx=0, eps=0.1, t_start=0.8),
+                ShockEvent.trajectory_switch(ic_b=(0.1, 0.2, 0.3), t_start=0.5),
+                ShockEvent.state_perturbation(state_idx=0, eps=0.1, t_start=0.8),
             )

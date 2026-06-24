@@ -12,12 +12,12 @@ Reading guide:
 
 Layout (top to bottom):
     1. Core types     — PartitionSpec, PartitionStats, DataBundle, BundleStep, BundlePlan
-    2. Known data     — KnownDataID, KnownMeta
-    3. Load stages    — StageLoadSynthetic, StageLoadTensor, StageLoadKnownCSV
-    4. Clean stages   — StageSelectColumns, StageDropBadColumns, StageImputeShortRuns, StageConvertToNumpy
-    5. Split stages   — StageSplitByFraction, StageComputeSplitStats
-    6. Noise stages   — StageInjectNoise, StageInjectTrainScaledNoise
-    7. Experiment     — TitrationPlan
+    2. Experiment     — DrawDesign, TitrationPlan (user-facing, placed early)
+    3. Known data     — KnownDataID, KnownMeta
+    4. Load stages    — StageLoadSynthetic, StageLoadTensor, StageLoadKnownCSV
+    5. Clean stages   — StageSelectColumns, StageDropBadColumns, StageImputeShortRuns, StageConvertToNumpy
+    6. Split stages   — StageSplitByFraction, StageComputeSplitStats
+    7. Noise stages   — StageInjectNoise, StageInjectTrainScaledNoise
     8. Diagnostics    — StagePrintDiagnostics (reports + renderers in diagnostics.py)
 """
 from __future__ import annotations
@@ -61,61 +61,84 @@ def _in_unit_interval(_inst, attr, value: float) -> None:
 
 @define(frozen=True, slots=True, kw_only=True)
 class PartitionSpec:
-    """Train/val/test split boundaries as fractions of the full series length.
+    """Train/validation/test split fractions for a time series.
+    时间序列的训练/验证/测试分割比例。
 
-    Fields use short names because they appear in hot-path index arithmetic.
-    t = train, v = val, s = test (s for "score" — the held-out evaluation split).
-    Each pair (x0, x1) is a half-open fraction interval: data[int(T*x0) : int(T*x1)].
-    Presets: PartitionSpec.p70_20_10(), .p60_20_20(), etc.
+    Each pair defines a half-open fraction interval over the full series:
+    ``data[int(T * train_start) : int(T * train_end)]`` selects the training
+    segment, and likewise for validation and test.
+    每对值定义序列上的半开分数区间：
+    ``data[int(T * train_start) : int(T * train_end)]`` 选取训练段，验证和测试段同理。
+
+    Use presets for common splits:
+    使用预设获取常见分割：
+
+        PartitionSpec.p70_20_10()   # 70% train, 20% val, 10% test
+        PartitionSpec.p60_20_20()   # 60% train, 20% val, 20% test
+
+    Or construct a custom split:
+    或构建自定义分割：
+
+        PartitionSpec(train_start=0.0, train_end=0.8,
+                      val_start=0.8, val_end=0.9,
+                      test_start=0.9, test_end=1.0)
     """
 
-    # === Fractions (policy only) ===
-    t0: float = field(validator=_in_unit_interval)  # train_start
-    t1: float = field(validator=_in_unit_interval)  # train_end
-    v0: float = field(validator=_in_unit_interval)  # val_start
-    v1: float = field(validator=_in_unit_interval)  # val_end
-    s0: float = field(validator=_in_unit_interval)  # test_start
-    s1: float = field(validator=_in_unit_interval)  # test_end
+    train_start: float = field(validator=_in_unit_interval)
+    train_end: float = field(validator=_in_unit_interval)
+    val_start: float = field(validator=_in_unit_interval)
+    val_end: float = field(validator=_in_unit_interval)
+    test_start: float = field(validator=_in_unit_interval)
+    test_end: float = field(validator=_in_unit_interval)
 
     def __attrs_post_init__(self) -> None:
-        if not (0.0 <= self.t0 < self.t1 <= 1.0):
-            raise ValueError(f"Train bounds invalid: {self.t0}-{self.t1}")
-        if not (self.t1 <= self.v0 < self.v1 <= 1.0):
-            raise ValueError(f"Val bounds invalid: {self.v0}-{self.v1}")
-        if not (self.v1 <= self.s0 < self.s1 <= 1.0):
-            raise ValueError(f"Test bounds invalid: {self.s0}-{self.s1}")
+        if not (0.0 <= self.train_start < self.train_end <= 1.0):
+            raise ValueError(f"Train bounds invalid: {self.train_start}-{self.train_end}")
+        if not (self.train_end <= self.val_start < self.val_end <= 1.0):
+            raise ValueError(f"Val bounds invalid: {self.val_start}-{self.val_end}")
+        if not (self.val_end <= self.test_start < self.test_end <= 1.0):
+            raise ValueError(f"Test bounds invalid: {self.test_start}-{self.test_end}")
 
     @classmethod
     def p70_10_20(cls):
-        return cls(t0=0.0, t1=0.7, v0=0.7, v1=0.8, s0=0.8, s1=1.0)
+        """70% train, 10% val, 20% test. 70%训练，10%验证，20%测试。"""
+        return cls(train_start=0.0, train_end=0.7, val_start=0.7, val_end=0.8, test_start=0.8, test_end=1.0)
 
     @classmethod
     def p70_20_10(cls):
-        return cls(t0=0.0, t1=0.7, v0=0.7, v1=0.9, s0=0.9, s1=1.0)
+        """70% train, 20% val, 10% test. 70%训练，20%验证，10%测试。"""
+        return cls(train_start=0.0, train_end=0.7, val_start=0.7, val_end=0.9, test_start=0.9, test_end=1.0)
 
     @classmethod
     def p60_20_20(cls):
-        return cls(t0=0.0, t1=0.6, v0=0.6, v1=0.8, s0=0.8, s1=1.0)
+        """60% train, 20% val, 20% test. 60%训练，20%验证，20%测试。"""
+        return cls(train_start=0.0, train_end=0.6, val_start=0.6, val_end=0.8, test_start=0.8, test_end=1.0)
 
     @classmethod
     def p50_25_25(cls):
-        return cls(t0=0.0, t1=0.5, v0=0.5, v1=0.75, s0=0.75, s1=1.0)
+        """50% train, 25% val, 25% test. 50%训练，25%验证，25%测试。"""
+        return cls(train_start=0.0, train_end=0.5, val_start=0.5, val_end=0.75, test_start=0.75, test_end=1.0)
 
     @classmethod
     def p60_15_25(cls):
-        return cls(t0=0.0, t1=0.6, v0=0.6, v1=0.75, s0=0.75, s1=1.0)
+        """60% train, 15% val, 25% test. 60%训练，15%验证，25%测试。"""
+        return cls(train_start=0.0, train_end=0.6, val_start=0.6, val_end=0.75, test_start=0.75, test_end=1.0)
 
     @classmethod
     def p60_10_30(cls):
-        return cls(t0=0.0, t1=0.6, v0=0.6, v1=0.7, s0=0.7, s1=1.0)
+        """60% train, 10% val, 30% test. 60%训练，10%验证，30%测试。"""
+        return cls(train_start=0.0, train_end=0.6, val_start=0.6, val_end=0.7, test_start=0.7, test_end=1.0)
 
     @classmethod
     def p50_10_40(cls):
-        return cls(t0=0.0, t1=0.5, v0=0.5, v1=0.6, s0=0.6, s1=1.0)
+        """50% train, 10% val, 40% test. 50%训练，10%验证，40%测试。"""
+        return cls(train_start=0.0, train_end=0.5, val_start=0.5, val_end=0.6, test_start=0.6, test_end=1.0)
 
     @classmethod
     def p70_gap_10_20(cls):
-        return cls(t0=0.0, t1=0.7, v0=0.71, v1=0.81, s0=0.82, s1=1.0)
+        """70% train, 10% val, 20% test with small gaps between splits.
+        70%训练，10%验证，20%测试，分割之间有小间隔。"""
+        return cls(train_start=0.0, train_end=0.7, val_start=0.71, val_end=0.81, test_start=0.82, test_end=1.0)
 
 
 @define(slots=True, frozen=True)
@@ -238,6 +261,224 @@ class BundlePlan(BundleStep):
 
     def __or__(self, right: BundleStep) -> "BundlePlan":
         return BundlePlan(parts=(*self.parts, right))
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 2. Experiment design (user-facing — placed early for discoverability)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class DrawDesign(StrEnum):
+    """How trajectory draws and noise draws are paired in a noise sweep.
+    噪声扫描中轨迹抽取和噪声抽取的配对方式。
+
+    - AUTO: let SERIE choose based on the source (default).
+      自动：让 SERIE 根据数据源选择（默认）。
+      Deterministic sources → NOISE_ONLY; stochastic → JOINT.
+    - NOISE_ONLY: one clean trajectory, crossed with multiple noise draws.
+      仅噪声：一条干净轨迹，与多个噪声抽取交叉。
+    - JOINT: pair trajectory draw r with noise draw r (for stochastic sources).
+      联合：将轨迹抽取 r 与噪声抽取 r 配对（用于随机数据源）。
+    - TRAJECTORY_FIXED: one stochastic trajectory with many noise draws
+      (measurement-noise-only diagnostic).
+      固定轨迹：一条随机轨迹配多个噪声抽取（仅测量噪声诊断）。
+    - CROSS_PRODUCT: full trajectory × noise grid (rarely needed).
+      叉积：完整的轨迹 × 噪声网格（很少需要）。
+    """
+
+    AUTO = auto()
+    NOISE_ONLY = auto()
+    JOINT = auto()
+    TRAJECTORY_FIXED = auto()
+    CROSS_PRODUCT = auto()
+
+
+@define(frozen=True, slots=True, kw_only=True)
+class TitrationPlan:
+    """Experiment grid for a noise-dose sweep: which noise levels to test and
+    how many independent draws to use.
+    噪声剂量扫描的实验网格：测试哪些噪声水平，使用多少独立抽取。
+
+    A plan defines the combinations of (noise_level, trajectory_draw, noise_draw)
+    that form the sweep. Use ``iter_cells(bank, plan)`` to iterate over them.
+    计划定义了构成扫描的 (噪声水平, 轨迹抽取, 噪声抽取) 组合。
+    使用 ``iter_cells(bank, plan)`` 来遍历它们。
+
+    Example:
+        >>> plan = TitrationPlan(noise_levels=(0.1, 0.5, 1.0))
+        >>> for cell in plan.iter_cells(bank):
+        ...     split = inject_noise(
+        ...         bank,
+        ...         sigma=cell.noise_level,
+        ...         trajectory_draw_ordinal=cell.trajectory_draw_ordinal,
+        ...         noise_draw_ordinal=cell.noise_draw_ordinal,
+        ...     )
+    """
+
+    noise_levels: tuple[float, ...] = field(
+        default=(1e-3, 1e-2, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0),
+        converter=tuple,
+    )
+    n_trajectory_draws: int = field(default=3, validator=validators.ge(1))
+    n_noise_draws: int = field(default=3, validator=validators.ge(1))
+    noise_seed_base: int = 1000
+    draw_design: DrawDesign = field(
+        default=DrawDesign.AUTO,
+        converter=DrawDesign,
+    )
+
+    def __attrs_post_init__(self) -> None:
+        if len(self.noise_levels) == 0:
+            raise ValueError("TitrationPlan.noise_levels cannot be empty")
+
+    @classmethod
+    def quick(cls) -> "TitrationPlan":
+        return cls(noise_levels=(0.1, 1.0), n_trajectory_draws=1, n_noise_draws=1)
+
+    @classmethod
+    def standard(cls) -> "TitrationPlan":
+        return cls()
+
+    def _resolved_draw_design(self, bank: "DGPBank") -> DrawDesign:
+        return self._resolved_draw_design_from_flag(bank.is_stochastic)
+
+    def _resolved_draw_design_from_flag(self, is_stochastic: bool) -> DrawDesign:
+        if self.draw_design is not DrawDesign.AUTO:
+            return self.draw_design
+        return (
+            DrawDesign.JOINT
+            if is_stochastic
+            else DrawDesign.NOISE_ONLY
+        )
+
+    def _require_available(self, bank: "DGPBank", *, n_trajectory: int, n_noise: int) -> None:
+        if bank.n_trajectory_draws < n_trajectory:
+            raise ValueError(
+                f"bank has {bank.n_trajectory_draws} trajectory draws, but plan requires {n_trajectory}"
+            )
+        if bank.n_noise_draws < n_noise:
+            raise ValueError(
+                "bank has "
+                f"{bank.n_noise_draws} noise draws, but plan requires {n_noise}"
+            )
+
+    def cell_count_per_sigma(self, *, is_stochastic: bool) -> int:
+        """Return the number of draw cells per sigma without a DGP bank."""
+        design = self._resolved_draw_design_from_flag(is_stochastic)
+        if design is DrawDesign.NOISE_ONLY:
+            if self.n_trajectory_draws != 1:
+                raise ValueError("noise_only requires n_trajectory_draws=1")
+            return self.n_noise_draws
+        if design is DrawDesign.JOINT:
+            if self.n_trajectory_draws != self.n_noise_draws:
+                raise ValueError("joint requires n_trajectory_draws == n_noise_draws")
+            return self.n_trajectory_draws
+        if design is DrawDesign.TRAJECTORY_FIXED:
+            if self.n_trajectory_draws != 1:
+                raise ValueError("trajectory_fixed requires n_trajectory_draws=1")
+            return self.n_noise_draws
+        if design is DrawDesign.CROSS_PRODUCT:
+            return self.n_trajectory_draws * self.n_noise_draws
+        raise ValueError(f"unknown draw_design={self.draw_design!r}")
+
+    def iter_cells(self, bank: "DGPBank") -> Iterator[TitrationCell]:
+        """Yield titration cells under the plan's draw design.
+
+        AUTO resolves to:
+        - deterministic/recorded sources: one clean trajectory path crossed with
+          noise draws (`noise_only`)
+        - stochastic sources: paired trajectory + noise draws by spawn
+          ordinal (`joint`)
+
+        Use `cross_product` only when the full trajectory × noise grid is an
+        explicit design choice, and `trajectory_fixed` only for the conditional
+        diagnostic "one stochastic path, many noises".
+        """
+        design = self._resolved_draw_design(bank)
+
+        if design is DrawDesign.NOISE_ONLY:
+            if self.n_trajectory_draws != 1:
+                raise ValueError(
+                    "noise_only uses exactly one clean/trajectory draw. "
+                    "Set n_trajectory_draws=1, or use draw_design='cross_product' "
+                    "if you intentionally want the full grid."
+                )
+            self._require_available(bank, n_trajectory=1, n_noise=self.n_noise_draws)
+            for noise_level in self.noise_levels:
+                for noise_draw_ordinal in range(self.n_noise_draws):
+                    yield bank.cell(
+                        noise_level=noise_level,
+                        trajectory_draw_ordinal=0,
+                        noise_draw_ordinal=noise_draw_ordinal,
+                    )
+            return
+
+        if design is DrawDesign.JOINT:
+            if not bank.is_stochastic:
+                raise ValueError("joint requires a stochastic DGP bank")
+            if self.n_trajectory_draws != self.n_noise_draws:
+                raise ValueError(
+                    "joint pairs trajectory and noise draws by spawn ordinal, "
+                    f"so n_trajectory_draws must equal n_noise_draws; got "
+                    f"{self.n_trajectory_draws} and {self.n_noise_draws}."
+                )
+            self._require_available(
+                bank,
+                n_trajectory=self.n_trajectory_draws,
+                n_noise=self.n_noise_draws,
+            )
+            for noise_level in self.noise_levels:
+                for draw_ordinal in range(self.n_trajectory_draws):
+                    yield bank.cell(
+                        noise_level=noise_level,
+                        trajectory_draw_ordinal=draw_ordinal,
+                        noise_draw_ordinal=draw_ordinal,
+                    )
+            return
+
+        if design is DrawDesign.TRAJECTORY_FIXED:
+            if not bank.is_stochastic:
+                raise ValueError("trajectory_fixed requires a stochastic DGP bank")
+            if self.n_trajectory_draws != 1:
+                raise ValueError(
+                    "trajectory_fixed is the conditional diagnostic with one trajectory path "
+                    "and many noise draws; set n_trajectory_draws=1."
+                )
+            self._require_available(bank, n_trajectory=1, n_noise=self.n_noise_draws)
+            for noise_level in self.noise_levels:
+                for noise_draw_ordinal in range(self.n_noise_draws):
+                    yield bank.cell(
+                        noise_level=noise_level,
+                        trajectory_draw_ordinal=0,
+                        noise_draw_ordinal=noise_draw_ordinal,
+                    )
+            return
+
+        if design is DrawDesign.CROSS_PRODUCT:
+            self._require_available(
+                bank,
+                n_trajectory=self.n_trajectory_draws,
+                n_noise=self.n_noise_draws,
+            )
+            for trajectory_draw_ordinal in range(self.n_trajectory_draws):
+                for noise_level in self.noise_levels:
+                    for noise_draw_ordinal in range(self.n_noise_draws):
+                        yield bank.cell(
+                            noise_level=noise_level,
+                            trajectory_draw_ordinal=trajectory_draw_ordinal,
+                            noise_draw_ordinal=noise_draw_ordinal,
+                        )
+            return
+
+        raise ValueError(f"unknown draw_design={self.draw_design!r}")
+
+    def cells(self, bank: "DGPBank") -> tuple[TitrationCell, ...]:
+        return tuple(self.iter_cells(bank))
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 3. Known data
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
 class KnownDataID(StrEnum):
@@ -780,9 +1021,9 @@ class StageSplitByFraction(BundleStep):
     def apply(self, db: "DataBundle") -> "DataBundle":
         logger.debug("partitioning data")
         n = db.series.shape[0]  # type: ignore
-        t0_idx, t1_idx = self.idx(self.partition_spec.t0, self.partition_spec.t1, n)
-        v0_idx, v1_idx = self.idx(self.partition_spec.v0, self.partition_spec.v1, n)
-        s0_idx, s1_idx = self.idx(self.partition_spec.s0, self.partition_spec.s1, n)
+        t0_idx, t1_idx = self.idx(self.partition_spec.train_start, self.partition_spec.train_end, n)
+        v0_idx, v1_idx = self.idx(self.partition_spec.val_start, self.partition_spec.val_end, n)
+        s0_idx, s1_idx = self.idx(self.partition_spec.test_start, self.partition_spec.test_end, n)
 
         db.partition_spec = self.partition_spec
         db.indices = (t0_idx, t1_idx, v0_idx, v1_idx, s0_idx, s1_idx)
@@ -904,187 +1145,7 @@ class StageInjectTrainScaledNoise(BundleStep):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 7. Experiment design
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-
-class DrawDesign(StrEnum):
-    """How trajectory and noise draws form sweep cells."""
-
-    AUTO = auto()
-    NOISE_ONLY = auto()
-    JOINT = auto()
-    TRAJECTORY_FIXED = auto()
-    CROSS_PRODUCT = auto()
-
-
-@define(frozen=True, slots=True, kw_only=True)
-class TitrationPlan:
-    """Physical grid for a noise sweep."""
-
-    noise_levels: tuple[float, ...] = field(
-        default=(1e-3, 1e-2, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0),
-        converter=tuple,
-    )
-    n_trajectory_draws: int = field(default=3, validator=validators.ge(1))
-    n_noise_draws: int = field(default=3, validator=validators.ge(1))
-    noise_seed_base: int = 1000
-    draw_design: DrawDesign = field(
-        default=DrawDesign.AUTO,
-        converter=DrawDesign,
-    )
-
-    def __attrs_post_init__(self) -> None:
-        if len(self.noise_levels) == 0:
-            raise ValueError("TitrationPlan.noise_levels cannot be empty")
-
-    @classmethod
-    def quick(cls) -> "TitrationPlan":
-        return cls(noise_levels=(0.1, 1.0), n_trajectory_draws=1, n_noise_draws=1)
-
-    @classmethod
-    def standard(cls) -> "TitrationPlan":
-        return cls()
-
-    def _resolved_draw_design(self, bank: "DGPBank") -> DrawDesign:
-        return self._resolved_draw_design_from_flag(bank.is_stochastic)
-
-    def _resolved_draw_design_from_flag(self, is_stochastic: bool) -> DrawDesign:
-        if self.draw_design is not DrawDesign.AUTO:
-            return self.draw_design
-        return (
-            DrawDesign.JOINT
-            if is_stochastic
-            else DrawDesign.NOISE_ONLY
-        )
-
-    def _require_available(self, bank: "DGPBank", *, n_trajectory: int, n_noise: int) -> None:
-        if bank.n_trajectory_draws < n_trajectory:
-            raise ValueError(
-                f"bank has {bank.n_trajectory_draws} trajectory draws, but plan requires {n_trajectory}"
-            )
-        if bank.n_noise_draws < n_noise:
-            raise ValueError(
-                "bank has "
-                f"{bank.n_noise_draws} noise draws, but plan requires {n_noise}"
-            )
-
-    def cell_count_per_sigma(self, *, is_stochastic: bool) -> int:
-        """Return the number of draw cells per sigma without a DGP bank."""
-        design = self._resolved_draw_design_from_flag(is_stochastic)
-        if design is DrawDesign.NOISE_ONLY:
-            if self.n_trajectory_draws != 1:
-                raise ValueError("noise_only requires n_trajectory_draws=1")
-            return self.n_noise_draws
-        if design is DrawDesign.JOINT:
-            if self.n_trajectory_draws != self.n_noise_draws:
-                raise ValueError("joint requires n_trajectory_draws == n_noise_draws")
-            return self.n_trajectory_draws
-        if design is DrawDesign.TRAJECTORY_FIXED:
-            if self.n_trajectory_draws != 1:
-                raise ValueError("trajectory_fixed requires n_trajectory_draws=1")
-            return self.n_noise_draws
-        if design is DrawDesign.CROSS_PRODUCT:
-            return self.n_trajectory_draws * self.n_noise_draws
-        raise ValueError(f"unknown draw_design={self.draw_design!r}")
-
-    def iter_cells(self, bank: "DGPBank") -> Iterator[TitrationCell]:
-        """Yield titration cells under the plan's draw design.
-
-        AUTO resolves to:
-        - deterministic/recorded sources: one clean trajectory path crossed with
-          noise draws (`noise_only`)
-        - stochastic sources: paired trajectory + noise draws by spawn
-          ordinal (`joint`)
-
-        Use `cross_product` only when the full trajectory × noise grid is an
-        explicit design choice, and `trajectory_fixed` only for the conditional
-        diagnostic "one stochastic path, many noises".
-        """
-        design = self._resolved_draw_design(bank)
-
-        if design is DrawDesign.NOISE_ONLY:
-            if self.n_trajectory_draws != 1:
-                raise ValueError(
-                    "noise_only uses exactly one clean/trajectory draw. "
-                    "Set n_trajectory_draws=1, or use draw_design='cross_product' "
-                    "if you intentionally want the full grid."
-                )
-            self._require_available(bank, n_trajectory=1, n_noise=self.n_noise_draws)
-            for noise_level in self.noise_levels:
-                for noise_draw_ordinal in range(self.n_noise_draws):
-                    yield bank.cell(
-                        noise_level=noise_level,
-                        trajectory_draw_ordinal=0,
-                        noise_draw_ordinal=noise_draw_ordinal,
-                    )
-            return
-
-        if design is DrawDesign.JOINT:
-            if not bank.is_stochastic:
-                raise ValueError("joint requires a stochastic DGP bank")
-            if self.n_trajectory_draws != self.n_noise_draws:
-                raise ValueError(
-                    "joint pairs trajectory and noise draws by spawn ordinal, "
-                    f"so n_trajectory_draws must equal n_noise_draws; got "
-                    f"{self.n_trajectory_draws} and {self.n_noise_draws}."
-                )
-            self._require_available(
-                bank,
-                n_trajectory=self.n_trajectory_draws,
-                n_noise=self.n_noise_draws,
-            )
-            for noise_level in self.noise_levels:
-                for draw_ordinal in range(self.n_trajectory_draws):
-                    yield bank.cell(
-                        noise_level=noise_level,
-                        trajectory_draw_ordinal=draw_ordinal,
-                        noise_draw_ordinal=draw_ordinal,
-                    )
-            return
-
-        if design is DrawDesign.TRAJECTORY_FIXED:
-            if not bank.is_stochastic:
-                raise ValueError("trajectory_fixed requires a stochastic DGP bank")
-            if self.n_trajectory_draws != 1:
-                raise ValueError(
-                    "trajectory_fixed is the conditional diagnostic with one trajectory path "
-                    "and many noise draws; set n_trajectory_draws=1."
-                )
-            self._require_available(bank, n_trajectory=1, n_noise=self.n_noise_draws)
-            for noise_level in self.noise_levels:
-                for noise_draw_ordinal in range(self.n_noise_draws):
-                    yield bank.cell(
-                        noise_level=noise_level,
-                        trajectory_draw_ordinal=0,
-                        noise_draw_ordinal=noise_draw_ordinal,
-                    )
-            return
-
-        if design is DrawDesign.CROSS_PRODUCT:
-            self._require_available(
-                bank,
-                n_trajectory=self.n_trajectory_draws,
-                n_noise=self.n_noise_draws,
-            )
-            for trajectory_draw_ordinal in range(self.n_trajectory_draws):
-                for noise_level in self.noise_levels:
-                    for noise_draw_ordinal in range(self.n_noise_draws):
-                        yield bank.cell(
-                            noise_level=noise_level,
-                            trajectory_draw_ordinal=trajectory_draw_ordinal,
-                            noise_draw_ordinal=noise_draw_ordinal,
-                        )
-            return
-
-        raise ValueError(f"unknown draw_design={self.draw_design!r}")
-
-    def cells(self, bank: "DGPBank") -> tuple[TitrationCell, ...]:
-        return tuple(self.iter_cells(bank))
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 8. Diagnostics (see diagnostics.py for reports + renderers)
+# 7. Diagnostics (see diagnostics.py for reports + renderers)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 from .diagnostics import print_diagnostics  # noqa: E402

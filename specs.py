@@ -8,7 +8,7 @@ Architecture:
 
 Design principles:
     1. Protocol specs are frozen+slots — no field reassignment after construction
-    2. Presets as classmethods — TrajectorySpec.lorenz_stationary(), etc.
+    2. Presets as classmethods — TrajectorySpec.lorenz(), TrajectorySpec.ou(), etc.
     3. Shocks compose via tuple — order = timeline, validated at construction
     4. Seed axes: trajectory root/child seeds, noise root/child seeds, model seed
 """
@@ -82,12 +82,27 @@ _EULER_METHOD_SYSTEMS = frozenset(
 
 @define(frozen=True, slots=True, kw_only=True)
 class TrajectorySpec:
-    """   
-    NOTE —  load() returns series of shape (steps - burn_in + 1, dim).
-        The +1 is the initial condition x(t0). This is universal across
-        all system types (ODE, SDE, discrete, PDE). For steps=35999,
-        burn_in=0, Lorenz gives 36000 rows.
-    """ 
+    """Specification for generating one synthetic dynamical system trajectory.
+    用于生成一条合成动力学系统轨迹的规格说明。
+
+    Defines which system to simulate (Lorenz, OU, GARCH, etc.), its parameters,
+    integration method, time step, and optional interventions (shocks).
+    定义要模拟的系统（Lorenz、OU、GARCH 等）、其参数、积分方法、时间步长
+    以及可选的干预（冲击）。
+
+    Use preset classmethods for common configurations:
+    使用预设类方法获取常见配置：
+
+        TrajectorySpec.lorenz()              # standard Lorenz attractor
+        TrajectorySpec.lorenz_param_shock()   # Lorenz with a parameter shift at 35%
+        TrajectorySpec.ou(steps=5000)         # Ornstein-Uhlenbeck process
+
+    NOTE: Output series has shape (steps - burn_in + 1, dim).
+    注意：输出序列的形状为 (steps - burn_in + 1, dim)。
+    The +1 is the initial condition x(t0). For steps=35999, burn_in=0,
+    Lorenz gives 36000 rows.
+    +1 是初始条件 x(t0)。对于 steps=35999、burn_in=0，Lorenz 给出 36000 行。
+    """
     system: ODESystem
     params: SystemParams
     dt: float
@@ -133,7 +148,7 @@ class TrajectorySpec:
             return f"{base}_{shocks.n_shocks}shocks"
         event = shocks.events[0]
         target_name = event.shocktype.name
-        if target_name == "SPLICE":
+        if target_name == "TRAJECTORY_SWITCH":
             return f"{base}_switch"
         if target_name == "ODE_PARAMS":
             return f"{base}_param_shock"
@@ -171,140 +186,166 @@ class TrajectorySpec:
 
     @classmethod
     def lorenz(cls, **kw) -> "TrajectorySpec":
+        """3D Lorenz attractor (deterministic chaos). 3维Lorenz吸引子（确定性混沌）。"""
         from .catalog import lorenz_spec
         return lorenz_spec(**kw)
 
     @classmethod
     def lorenz_param_shock(cls) -> "TrajectorySpec":
+        """Lorenz with an abrupt parameter shift at 35%. Lorenz系统在35%处突然参数偏移。"""
         from .catalog import lorenz_param_shock_spec
         return lorenz_param_shock_spec()
 
     @classmethod
     def lorenz_state_shock(cls) -> "TrajectorySpec":
+        """Lorenz with an additive state perturbation at 35%. Lorenz系统在35%处叠加状态扰动。"""
         from .catalog import lorenz_state_shock_spec
         return lorenz_state_shock_spec()
 
     @classmethod
     def lorenz_switch(cls) -> "TrajectorySpec":
+        """Lorenz with a trajectory switch at 35% (different IC/params). Lorenz系统在35%处轨迹切换（不同初条件/参数）。"""
         from .catalog import lorenz_switch_spec
         return lorenz_switch_spec()
 
     @classmethod
     def rossler(cls, **kw) -> "TrajectorySpec":
+        """3D Rössler attractor (simpler single-scroll chaos). 3维Rössler吸引子（更简单的单涡卷混沌）。"""
         from .catalog import rossler_spec
         return rossler_spec(**kw)
 
     @classmethod
     def rossler_param_shock(cls) -> "TrajectorySpec":
+        """Rössler with an abrupt parameter shift at 35%. Rössler系统在35%处突然参数偏移。"""
         from .catalog import rossler_param_shock_spec
         return rossler_param_shock_spec()
 
     @classmethod
     def chua(cls, **kw) -> "TrajectorySpec":
+        """3D Chua circuit double-scroll attractor. 3维蔡氏电路双涡卷吸引子。"""
         from .catalog import chua_spec
         return chua_spec(**kw)
 
     @classmethod
     def chua_param_shock(cls) -> "TrajectorySpec":
+        """Chua with an abrupt parameter shift at 35%. 蔡氏电路在35%处突然参数偏移。"""
         from .catalog import chua_param_shock_spec
         return chua_param_shock_spec()
 
     @classmethod
     def chua_switch(cls) -> "TrajectorySpec":
+        """Chua with a trajectory switch at 35%. 蔡氏电路在35%处轨迹切换。"""
         from .catalog import chua_switch_spec
         return chua_switch_spec()
 
     @classmethod
     def lorenz96(cls, **kw) -> "TrajectorySpec":
+        """N-D Lorenz-96 weather model (default dim=6). N维Lorenz-96气象模型（默认dim=6）。"""
         from .catalog import lorenz96_spec
         return lorenz96_spec(**kw)
 
     @classmethod
     def lorenz96_switch(cls) -> "TrajectorySpec":
+        """Lorenz-96 with a trajectory switch at 35%. Lorenz-96在35%处轨迹切换。"""
         from .catalog import lorenz96_switch_spec
         return lorenz96_switch_spec()
 
     @classmethod
     def ou(cls, **kw) -> "TrajectorySpec":
+        """1D Ornstein-Uhlenbeck mean-reverting SDE (stochastic). 1维OU均值回归随机微分方程（随机）。"""
         from .catalog import ou_spec
         return ou_spec(**kw)
 
     @classmethod
     def ou_param_shock(cls) -> "TrajectorySpec":
+        """OU with a mean-level shift at 35%. OU过程在35%处均值水平偏移。"""
         from .catalog import ou_param_shock_spec
         return ou_param_shock_spec()
 
     @classmethod
     def doublewell(cls, **kw) -> "TrajectorySpec":
+        """1D bistable double-well SDE (stochastic). 1维双稳态双势阱随机微分方程（随机）。"""
         from .catalog import doublewell_spec
         return doublewell_spec(**kw)
 
     @classmethod
     def doublewell_param_shock(cls) -> "TrajectorySpec":
+        """Double-well with a parameter shift at 35%. 双势阱在35%处参数偏移。"""
         from .catalog import doublewell_param_shock_spec
         return doublewell_param_shock_spec()
 
     @classmethod
     def doublewell_switch(cls) -> "TrajectorySpec":
+        """Double-well with a trajectory switch at 35%. 双势阱在35%处轨迹切换。"""
         from .catalog import doublewell_switch_spec
         return doublewell_switch_spec()
 
     @classmethod
     def slds(cls, **kw) -> "TrajectorySpec":
+        """1D switching linear dynamical system with 2 regimes (stochastic). 1维2体制切换线性动力系统（随机）。"""
         from .catalog import slds_spec
         return slds_spec(**kw)
 
     @classmethod
     def slds_param_shock(cls) -> "TrajectorySpec":
+        """SLDS with a parameter shift at 35%. SLDS在35%处参数偏移。"""
         from .catalog import slds_param_shock_spec
         return slds_param_shock_spec()
 
     @classmethod
     def slds_switch(cls) -> "TrajectorySpec":
+        """SLDS with a trajectory switch at 35%. SLDS在35%处轨迹切换。"""
         from .catalog import slds_switch_spec
         return slds_switch_spec()
 
     @classmethod
     def seasonal_ar(cls, **kw) -> "TrajectorySpec":
+        """1D seasonal autoregressive process (stochastic). 1维季节性自回归过程（随机）。"""
         from .catalog import seasonal_ar_spec
         return seasonal_ar_spec(**kw)
 
     @classmethod
     def seasonal_ar_param_shock(cls) -> "TrajectorySpec":
+        """Seasonal AR with a parameter shift at 35%. 季节性AR在35%处参数偏移。"""
         from .catalog import seasonal_ar_param_shock_spec
         return seasonal_ar_param_shock_spec()
 
     @classmethod
     def garch(cls, **kw) -> "TrajectorySpec":
+        """2D GARCH(1,1) volatility model (stochastic). 2维GARCH(1,1)波动率模型（随机）。"""
         from .catalog import garch_spec
         return garch_spec(**kw)
 
     @classmethod
     def garch_param_shock(cls) -> "TrajectorySpec":
+        """GARCH with a parameter shift at 35%. GARCH在35%处参数偏移。"""
         from .catalog import garch_param_shock_spec
         return garch_param_shock_spec()
 
     @classmethod
     def ks(cls, **kw) -> "TrajectorySpec":
+        """Kuramoto-Sivashinsky PDE (spatiotemporal chaos, default 64 modes). KS偏微分方程（时空混沌，默认64模态）。"""
         from .catalog import ks_spec
         return ks_spec(**kw)
 
     @classmethod
     def ks_param_shock(cls) -> "TrajectorySpec":
+        """KS with a diffusion parameter shift at 35%. KS方程在35%处扩散参数偏移。"""
         from .catalog import ks_param_shock_spec
         return ks_param_shock_spec()
 
     @classmethod
     def diagonal(cls, **kw) -> "TrajectorySpec":
+        """Linear diagonal system dx/dt = diag(λ)x — eigenvalue recovery test. 线性对角系统dx/dt=diag(λ)x——特征值恢复测试。"""
         from .catalog import diagonal_spec
         return diagonal_spec(**kw)
      
  
 class ShockType(StrEnum):
-    """What gets perturbed."""
-    ODE_PARAMS = auto()     # wholesale replacement of ALL params
-    STATE = auto()          # additive state perturbation x[idx] += eps
-    SPLICE = auto()         # same-system trajectory splice (different IC/params)
+    """What kind of perturbation is applied. 施加哪种类型的扰动。"""
+    ODE_PARAMS = auto()     # wholesale replacement of ALL params / 批量替换所有参数
+    STATE = auto()          # additive state perturbation x[idx] += eps / 叠加状态扰动
+    TRAJECTORY_SWITCH = auto()         # same-system trajectory switch (different IC/params) / 同系统轨迹切换（不同初条件/参数）
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -314,14 +355,24 @@ class ShockType(StrEnum):
 
 @define(frozen=True, slots=True, kw_only=True)
 class ShockEvent:
-    """A single designed perturbation on the timeline. 
-    Consumer: SyntheticDataGenerator (applies shock during integration). 
-    Times are in FRACTION of usable T (0.0 = start of usable data, 1.0 = end).
-    This makes shocks independent of absolute T and transient settings.
+    """One designed perturbation (intervention) on the trajectory timeline.
+    轨迹时间线上的一次设计性扰动（干预）。
 
-    For parameter transitions:
-      - t_start == t_end and n_inserts == 1 means one abrupt replacement
-      - t_start < t_end and n_inserts == k means k scheduled updates over the window
+    Applied during integration to test how a forecaster handles regime shifts,
+    state perturbations, or trajectory switches.
+    在积分过程中应用，用于测试预测器如何处理体制转换、状态扰动或轨迹切换。
+
+    Times are FRACTIONS of the usable trajectory (0.0 = start, 1.0 = end),
+    so shocks are independent of absolute T and burn-in settings.
+    时间是可用轨迹的分数（0.0=起点，1.0=终点），因此冲击与绝对T和burn_in设置无关。
+
+    For parameter stepped transitions:
+    参数分步过渡：
+      - t_start == t_end and n_inserts == 1: abrupt replacement (突然替换)
+      - t_start < t_end and n_inserts == k: k scheduled updates over window (窗口内k次调度更新)
+
+    Use presets: ShockEvent.params_step_change(), .state_perturbation(), .trajectory_switch()
+    使用预设：ShockEvent.params_step_change()、.state_perturbation()、.trajectory_switch()
     """
 
     name: str  # human-readable: "rho_transition_28_to_35"
@@ -339,9 +390,9 @@ class ShockEvent:
     state_idx: int = 0
     eps: float = 0.0
 
-    # ── For SPLICE target (same-system, different IC) ──
+    # ── For TRAJECTORY_SWITCH target (same-system, different IC) ──
     ic_b: tuple[float, ...] | None = None
-    # params_after reused for splice (B-trajectory params)
+    # params_after reused for the B-trajectory params
 
     def __attrs_post_init__(self) -> None:
         if self.t_end < self.t_start:
@@ -349,7 +400,7 @@ class ShockEvent:
                 f"ShockEvent '{self.name}' has t_end={self.t_end} before t_start={self.t_start}"
             )
 
-        if self.shocktype in {ShockType.STATE, ShockType.SPLICE}:
+        if self.shocktype in {ShockType.STATE, ShockType.TRAJECTORY_SWITCH}:
             if self.t_end != self.t_start:
                 raise ValueError(
                     f"{self.shocktype.name} shock '{self.name}' must be instantaneous: "
@@ -372,12 +423,12 @@ class ShockEvent:
 
     # ── Presets ──────────────────────────────────────────────────────
     @classmethod
-    def params_replace(
+    def params_step_change(
         cls, params_after: SystemParams, t_start: float, name: str = ""
     ) -> ShockEvent:
-        """Wholesale parameter replacement at t_start. All params change at once."""
+        """Parameter step change at t_start. All params change at once."""
         return cls(
-            name=name or f"params_replace_at_{t_start}",
+            name=name or f"params_step_change_at_{t_start}",
             shocktype=ShockType.ODE_PARAMS, 
             t_start=t_start,
             t_end=t_start,
@@ -386,7 +437,7 @@ class ShockEvent:
         )
 
     @classmethod
-    def params_transition(
+    def params_stepped_transition(
         cls,
         params_after: SystemParams,
         t_start: float,
@@ -394,9 +445,9 @@ class ShockEvent:
         n_inserts: int,
         name: str = "",
     ) -> ShockEvent:
-        """Parameter transition from t_start to t_end with explicit update count."""
+        """Parameter stepped transition from t_start to t_end with explicit update count."""
         return cls(
-            name=name or f"params_transition_at_{t_start}_to_{t_end}",
+            name=name or f"params_stepped_transition_at_{t_start}_to_{t_end}",
             shocktype=ShockType.ODE_PARAMS,
             t_start=t_start,
             t_end=t_end,
@@ -405,12 +456,12 @@ class ShockEvent:
         )
     
     @classmethod
-    def state_kick(
+    def state_perturbation(
         cls, state_idx: int, eps: float, t_start: float, name: str = ""
     ) -> ShockEvent:
         """Additive state perturbation: x[state_idx] += eps at t_start."""
         return cls(
-            name=name or f"state_kick_idx{state_idx}_eps{eps}",
+            name=name or f"state_perturbation_idx{state_idx}_eps{eps}",
             shocktype=ShockType.STATE, 
             t_start=t_start,
             t_end=t_start,
@@ -420,22 +471,22 @@ class ShockEvent:
         )
         
     @classmethod
-    def trajectory_splice(
+    def trajectory_switch(
         cls,
         ic_b: tuple[float, ...],
         t_start: float,
         params_after: SystemParams | None = None,
         name: str = "",
     ) -> ShockEvent:
-        """Same-system trajectory splice at t_start.
+        """Same-system trajectory switch at t_start.
 
         Runs two independent trajectories (A with TrajectorySpec.x0/params,
-        B with ic_b/params_after) and splices at t_start.
+        B with ic_b/params_after) and switches from A to B at t_start.
         If params_after is None, B uses the same params as A.
         """
         return cls(
-            name=name or f"splice_at_{t_start}",
-            shocktype=ShockType.SPLICE, 
+            name=name or f"trajectory_switch_at_{t_start}",
+            shocktype=ShockType.TRAJECTORY_SWITCH, 
             t_start=t_start,
             t_end=t_start,
             n_inserts=1,
@@ -446,18 +497,24 @@ class ShockEvent:
 
 @define(frozen=True, slots=True, kw_only=True)
 class ShockSchedule:
-    """Time-ordered shock schedule. Empty means stationary baseline.
+    """Time-ordered sequence of interventions on a trajectory. Empty = no shocks.
+    轨迹上的时间排序干预序列。空 = 无冲击（静态基线）。
 
-    Multiple ODE parameter and state shocks are supported. Splice remains a
-    single-event schedule because it cuts between independently generated
-    trajectories rather than perturbing one integration in place.
+    Multiple parameter and state shocks are supported. Trajectory switch remains
+    single-event because it cuts between independently generated trajectories
+    rather than perturbing one integration in place.
+    支持多个参数和状态冲击。轨迹切换保持为单一事件，因为它是在独立生成的
+    轨迹之间切换，而非在原地扰动一次积分。
+
+    Use presets: ShockSchedule.none(), .single(event), .multiple(e1, e2, ...)
+    使用预设：ShockSchedule.none()、.single(event)、.multiple(e1, e2, ...)
     """
 
     events: tuple[ShockEvent, ...] = ()
 
     def __attrs_post_init__(self) -> None:
-        if len(self.events) > 1 and any(e.shocktype == ShockType.SPLICE for e in self.events):
-            raise ValueError("SPLICE shocks cannot be combined with other events")
+        if len(self.events) > 1 and any(e.shocktype == ShockType.TRAJECTORY_SWITCH for e in self.events):
+            raise ValueError("TRAJECTORY_SWITCH shocks cannot be combined with other events")
         for i in range(len(self.events) - 1):
             if self.events[i].t_start > self.events[i + 1].t_start:
                 raise ValueError(
@@ -495,7 +552,14 @@ class ShockSchedule:
 
 @define(frozen=True, slots=True, kw_only=True)
 class TitrationCell:
-    """Identity of one cell in a titration grid. For logging and DB registration."""
+    """One point in a noise-dose sweep: a specific (noise_level, trajectory_draw,
+    noise_draw) combination, with full seed provenance for reproducibility.
+    噪声剂量扫描中的一个点：特定的（噪声水平、轨迹抽取、噪声抽取）组合，
+    附带完整的种子溯源信息以确保可复现性。
+
+    Created by ``DGPBank.cell()`` or yielded by ``TitrationPlan.iter_cells()``.
+    由 ``DGPBank.cell()`` 创建或由 ``TitrationPlan.iter_cells()`` 产出。
+    """
 
     source_name: str
     noise_level: float        # noise amplitude for this cell
@@ -519,17 +583,25 @@ class TitrationCell:
 
 @define(frozen=True, slots=True, kw_only=True)
 class DGPBank:
-    """Frozen draw bank for one data-generating process.
+    """Pre-computed clean trajectories and frozen noise arrays for one
+    data-generating process (DGP). Build once, then inject noise many times.
+    一个数据生成过程（DGP）的预计算干净轨迹和冻结噪声数组。构建一次，然后多次注入噪声。
 
-    noisy = clean[trajectory_draw_ordinal] + noise_level * noise_draws[noise_draw_ordinal]
+    The core equation is:
+    核心方程为：
 
-    `TitrationPlan` decides which `(trajectory_draw_ordinal, noise_draw_ordinal)` pairs are benchmark
-    cells: deterministic sources normally use one clean path with many
-    noise draws; stochastic sources normally pair trajectory and noise
-    draws by spawn ordinal.
+        observed = clean[trajectory_draw] + sigma * noise_draws[noise_draw]
 
-    Built-in noise draws are unit-variance by convention. Custom draws may
-    carry any known scale; in that case `noise_level` is a raw multiplier.
+    Because the noise arrays are frozen inside the bank, every sigma level
+    reuses the SAME underlying random draw (common random numbers), so
+    differences across sigma levels are caused by noise dose, not luck.
+    因为噪声数组在bank内部是冻结的，每个sigma水平重用相同的底层随机抽取
+    （公共随机数），所以不同sigma水平之间的差异是由噪声剂量造成的，而非运气。
+
+    Created by ``build_dgp_bank()`` or ``build_empirical_dgp_bank()``.
+    Use ``inject_noise(bank, sigma=...)`` to get train/val/test splits.
+    由 ``build_dgp_bank()`` 或 ``build_empirical_dgp_bank()`` 创建。
+    使用 ``inject_noise(bank, sigma=...)`` 获取训练/验证/测试分割。
     """
     name: str
     trajectory_seed_base: int
