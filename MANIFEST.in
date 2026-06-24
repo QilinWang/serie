@@ -1,0 +1,15 @@
+exclude Justfile
+exclude .claude/*
+exclude .pytest_cache/*
+exclude __pycache__/*
+recursive-include demo_dist *
+recursive-exclude demo_dist attractor_data.json
+recursive-exclude assets *
+recursive-exclude demo *
+recursive-exclude tmp *
+recursive-exclude .claude *
+recursive-exclude .pytest_cache *
+recursive-exclude __pycache__ *
+recursive-exclude tests __pycache__ *
+global-exclude *.py[cod]
+global-exclude .DS_Store

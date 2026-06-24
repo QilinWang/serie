@@ -1,0 +1,93 @@
+[project]
+name = "serie"
+version = "0.1.1"
+description = "Time-series evaluation data layer for clean sources, interventions, and noise titration."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "Qilin Wang" },
+]
+keywords = ["time-series", "forecasting", "benchmarking", "dynamical-systems", "robustness", "titration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "attrs>=24.0",
+    "cappa>=0.31.0",
+    "matplotlib>=3.8",
+    "numpy>=2.0",
+    "polars>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/QilinWang"
+Repository = "https://github.com/QilinWang"
+
+[project.scripts]
+serie = "serie.cli:main"
+
+[project.optional-dependencies]
+diagnostics = [
+    "rich>=13.0",
+]
+all = [
+    "rich>=13.0",
+]
+dev = [
+    "pytest>=8.0",
+    "rich>=13.0",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "serie" = "." }
+packages = ["serie"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+serie = [
+    "demo_dist/**",
+]
+
+[tool.setuptools.exclude-package-data]
+serie = [
+    "assets/**",
+    "demo/**",
+    "demo_dist/attractor_data.json",
+    ".claude/**",
+    ".pytest_cache/**",
+    "__pycache__/**",
+    "*.pyc",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # Existing scientific expressions and tables use long lines. Let the
+    # formatter handle what it can without making line length a release gate.
+    "E501",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

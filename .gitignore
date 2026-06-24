@@ -1,0 +1,36 @@
+# Python caches/build outputs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Local environments and secrets
+.venv/
+.env
+.env.*
+secrets.*
+.claude/
+
+# Large/local data and generated outputs
+/assets/
+tmp/
+release_artifacts/
+
+# SERIE demo development artifacts
+demo/node_modules/
+demo/dist/
+demo/.vite/
+demo/*.tsbuildinfo
+demo/vite.config.js
+demo/vite.config.d.ts
+demo/public/attractor_data.json
+
+# Packaged viewer template must not contain baked data.
+demo_dist/attractor_data.json
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
