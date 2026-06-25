@@ -1315,6 +1315,64 @@ def _demo_payload(
     }
 
 
+def _demo_pack_payload(
+    source: str,
+    *,
+    out_dir: Path,
+    input_path: Path | None,
+    input_name: str | None,
+    seed: int,
+    n_points: int,
+    n_draws: int,
+    overwrite: bool,
+) -> dict[str, Any]:
+    """Write an inspectable demo folder: HTML + JSON + static plots."""
+    if out_dir.exists() and any(out_dir.iterdir()) and not overwrite:
+        raise SystemExit(f"{out_dir} is not empty; pass --overwrite to replace files")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    html_path = out_dir / "index.html"
+    data_path = out_dir / "demo_data.json"
+    payload = _demo_payload(
+        source,
+        out=html_path,
+        input_path=input_path,
+        input_name=input_name,
+        data_out=data_path,
+        seed=seed,
+        n_points=n_points,
+        n_draws=n_draws,
+        overwrite=overwrite,
+    )
+
+    plots: dict[str, str] = {}
+    if input_path is None:
+        from .plots import plot_source_saves
+
+        try:
+            written = plot_source_saves(
+                _normalize_source_name(source),
+                out=out_dir / "static",
+                kind="both",
+                seed=seed,
+                sigma=0.24,
+                max_points=n_points,
+                overwrite=overwrite,
+            )
+        except ValueError as exc:
+            plots["error"] = str(exc)
+        else:
+            plots = {name: str(path) for name, path in written.items()}
+
+    return {
+        "out_dir": str(out_dir),
+        "html": str(html_path),
+        "data": str(data_path),
+        "plots": plots,
+        **payload,
+    }
+
+
 @cappa.command
 @attrs.define
 class Demo:
@@ -1322,6 +1380,13 @@ class Demo:
 
     source: Annotated[str, cappa.Arg(default="lorenz")]
     out: Annotated[Path, cappa.Arg(long=True)] = Path("serie_demo.html")
+    out_dir: Annotated[
+        Path | None,
+        cappa.Arg(
+            long=True,
+            help="Optional demo folder containing index.html, demo_data.json, and static plots.",
+        ),
+    ] = None
     input: Annotated[
         Path | None,
         cappa.Arg(
@@ -1341,6 +1406,27 @@ class Demo:
     format: Annotated[OutputFormat, cappa.Arg(long=True)] = "json"
 
     def __call__(self) -> None:
+        if self.out_dir is not None:
+            out_dir = self.out_dir
+            if self.out != Path("serie_demo.html"):
+                raise SystemExit(
+                    "use either --out for one HTML file or --out-dir for a demo folder"
+                )
+            _emit_payload(
+                lambda: _demo_pack_payload(
+                    self.source,
+                    out_dir=out_dir,
+                    input_path=self.input,
+                    input_name=self.input_name,
+                    seed=self.seed,
+                    n_points=self.n_points,
+                    n_draws=self.n_draws,
+                    overwrite=self.overwrite,
+                ),
+                self.format,
+            )
+            return
+
         _emit_payload(
             lambda: _demo_payload(
                 self.source,

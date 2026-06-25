@@ -356,6 +356,7 @@ sources: `lorenz`, `rossler`, `chua`, `vanderpol`, `henon`, `logistic`.
 ```bash
 serie demo lorenz --out tmp/lorenz_demo.html
 serie demo henon --out tmp/henon_demo.html --data-out tmp/henon_demo.json
+serie demo henon --out-dir tmp/henon_demo_pack
 ```
 
 `--data-out` writes the browser payload as JSON. That JSON is the viewer
@@ -365,6 +366,10 @@ load it with the **Load local JSON** button. SERIE's data interchange artifacts
 remain `npy`/CSV/IPC/Parquet exports from `serie generate`/`serie export`; Fern-side
 high-throughput handoff can keep using IPC. JSON is for browser visualization
 and metadata, not the preferred bulk array format.
+
+Use `--out-dir` when you want an inspection folder instead of one HTML file.
+It writes `index.html`, `demo_data.json`, and static PNG plots under `static/`.
+The single-file `--out` path remains the best default for sharing.
 
 **`walkthrough`** is the full package verification — it writes arrays, CSVs,
 manifests, and figures for both a regular and parameter-shifted Lorenz source.

@@ -254,6 +254,7 @@ serie generate ou --sigma 1.0 --sigma-scale train_std --format json
 serie demo lorenz --out tmp/lorenz_demo.html
 serie demo rossler --out tmp/rossler_demo.html --n-draws 30 --overwrite
 serie demo chua --out tmp/chua_demo.html --n-points 4000 --n-draws 30 --overwrite
+serie demo henon --out-dir tmp/henon_demo_pack --overwrite
 ```
 
 生成的是一个单文件 HTML。浏览器里可以拖拽 3D attractor，滑动 `sigma` 实时看到：
@@ -265,6 +266,10 @@ clean + sigma * noise_draw
 这里的 `sigma` 是 unit-noise scale 下的自然噪声倍率。`Noise realization` 下拉框选择的是第几个冻结噪声 realization；同一个 realization 会在不同 `sigma` 下重复使用。
 
 这些 HTML 很适合放到 GitHub Release 或静态网站作为展示材料，但不应该打进 PyPI wheel。PyPI 包里只带一个小的 viewer template，真正的数据由 `serie demo` 在本地生成后内联进 HTML。
+
+如果你想一次得到一个检查用文件夹，用 `--out-dir`。它会写出
+`index.html`、`demo_data.json`，以及 `static/` 里的 PNG 图。普通 `--out`
+仍然是最适合分享的单文件 HTML。
 
 ## Python API
 

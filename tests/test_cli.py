@@ -272,6 +272,34 @@ def test_cli_demo_converts_local_csv_to_viewer_json(tmp_path, capsys):
     assert data["feature_names"] == ["x", "y", "zero"]
 
 
+def test_cli_demo_out_dir_writes_html_json_and_static_plots(tmp_path, capsys):
+    pytest.importorskip("matplotlib")
+    out_dir = tmp_path / "henon_demo"
+    cli.main(
+        [
+            "demo",
+            "henon",
+            "--out-dir",
+            str(out_dir),
+            "--n-points",
+            "80",
+            "--n-draws",
+            "1",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["out_dir"] == str(out_dir)
+    assert payload["html"] == str(out_dir / "index.html")
+    assert payload["data"] == str(out_dir / "demo_data.json")
+    assert sorted(payload["plots"]) == ["attractor", "timeseries"]
+    assert (out_dir / "index.html").exists()
+    assert (out_dir / "demo_data.json").exists()
+    assert (out_dir / "static" / "henon_timeseries.png").exists()
+    assert (out_dir / "static" / "henon_attractor.png").exists()
+
+
 def test_cli_export_writes_npys_and_manifest(tmp_path, capsys):
     out = tmp_path / "export"
     cli.main(

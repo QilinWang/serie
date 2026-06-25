@@ -77,11 +77,14 @@ Use these for quick checks:
 serie inspect lorenz --format json
 serie data-dir --format json
 serie demo lorenz --out tmp/lorenz_demo.html --overwrite
+serie demo henon --out-dir tmp/henon_demo_pack --overwrite --format json
 serie walkthrough --out tmp/walkthrough --overwrite --format json
 ```
 
 `demo` writes a self-contained HTML file for `lorenz`, `rossler`, `chua`,
 `vanderpol`, `henon`, or `logistic`.
+Use `demo --out-dir` when a folder with HTML, viewer JSON, and static PNG plots
+is more useful than one shareable HTML file.
 `walkthrough` writes a fuller audit with arrays, manifests, and figures.
 
 ## Concepts To Preserve
