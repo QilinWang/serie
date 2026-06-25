@@ -38,12 +38,6 @@ system-check out="tmp/system_check":
     just clean-system-check {{out}}
     UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" python ../docs/dev/serie_release/system_check.py --out {{out}}
 
-# Source-only Python example; hidden because it is not an installed CLI command.
-[group("03 author-dev")]
-[private]
-example-run:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . python -m serie.example
-
 # Run the SERIE test suite against the editable checkout.
 [group("03 author-dev")]
 dev-test:
@@ -87,6 +81,28 @@ dev-env:
     env -u UV_PROJECT_ENVIRONMENT UV_CACHE_DIR=/tmp/uv-cache uv venv .venv
     UV_CACHE_DIR=/tmp/uv-cache uv pip install --python .venv/bin/python -e ".[dev,diagnostics]"
 
+# Rebuild the packaged browser viewer template from demo/.
+# Note for agents: Vite/esbuild can hang inside the Codex sandbox; run this
+# recipe outside the sandbox if the sandboxed build stalls after `vite build`.
+[group("03 author-dev")]
+dev-demo-template:
+    cd demo && XDG_RUNTIME_DIR=/tmp TMPDIR=/tmp bun run build
+    rm -rf demo_dist
+    cp -R demo/dist demo_dist
+    rm -f demo_dist/attractor_data.json
+
+# Generate local HTML/JSON demo files for visual inspection. Outputs are ignored.
+[group("03 author-dev")]
+dev-demo-inspect out="tmp/candidate_demos":
+    rm -rf {{out}}
+    mkdir -p {{out}}
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo lorenz --out {{out}}/lorenz.html --data-out {{out}}/lorenz.json --n-points 4000 --n-draws 5 --overwrite --format json
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo rossler --out {{out}}/rossler.html --data-out {{out}}/rossler.json --n-points 4000 --n-draws 5 --overwrite --format json
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo chua --out {{out}}/chua.html --data-out {{out}}/chua.json --n-points 4000 --n-draws 5 --overwrite --format json
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo vanderpol --out {{out}}/vanderpol.html --data-out {{out}}/vanderpol.json --n-points 4000 --n-draws 5 --overwrite --format json
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo henon --out {{out}}/henon.html --data-out {{out}}/henon.json --n-points 4000 --n-draws 5 --overwrite --format json
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo logistic --out {{out}}/logistic.html --data-out {{out}}/logistic.json --n-points 4000 --n-draws 5 --overwrite --format json
+
 # Build sdist and wheel into dist/, then remove temporary egg-info.
 [group("04 author-release")]
 release-build:
@@ -105,7 +121,7 @@ release-check tmp="tmp/release_check":
     uv pip install --python {{tmp}}/.venv/bin/python dist/serie-{{version}}-py3-none-any.whl
     {{tmp}}/.venv/bin/serie version
     {{tmp}}/.venv/bin/serie inspect lorenz --format json
-    {{tmp}}/.venv/bin/serie generate lorenz --out {{tmp}}/export --sigma 0.1 --array-format both --format json
+    {{tmp}}/.venv/bin/serie generate lorenz --out {{tmp}}/export --sigma 0.1 --array-format all --format json
     {{tmp}}/.venv/bin/serie walkthrough --out {{tmp}}/walkthrough --overwrite --format json
     just release-check-files {{tmp}}
     just clean-release-check {{tmp}}
@@ -127,8 +143,12 @@ release-preview-publish:
 release-check-files tmp="tmp/release_check":
     test -f {{tmp}}/export/clean.npy
     test -f {{tmp}}/export/clean.csv
+    test -f {{tmp}}/export/clean.ipc
+    test -f {{tmp}}/export/clean.parquet
     test -f {{tmp}}/export/noise_draws.npy
     test -f {{tmp}}/export/noise_draws.csv
+    test -f {{tmp}}/export/noise_draws.ipc
+    test -f {{tmp}}/export/noise_draws.parquet
     test -f {{tmp}}/export/manifest.json
     test -f {{tmp}}/walkthrough/arrays/lorenz/clean.npy
     test -f {{tmp}}/walkthrough/arrays/lorenz/clean.csv

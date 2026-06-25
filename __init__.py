@@ -49,6 +49,7 @@ def load_data(source, **kw) -> "TimeSeriesData":
         >>> ts.values.shape    # (1001, 3)
     """
     from .data import load_data as _load_data
+
     return _load_data(source, **kw)
 
 
@@ -76,6 +77,7 @@ def build_dgp_bank(source, **kw) -> "DGPBank":
         >>> bank = build_dgp_bank(TrajectorySpec.ou(steps=5000), seed=0)
     """
     from .api import build_dgp_bank as _build_dgp_bank
+
     return _build_dgp_bank(source, **kw)
 
 
@@ -83,9 +85,9 @@ def build_empirical_dgp_bank(values, **kw) -> "DGPBank":
     """Wrap a clean recorded [T, D] array as a DGP (Data Generating Process) bank.
     将一个干净的录制 [T, D] 数组包装为 DGP（数据生成过程）bank。
 
-    Use this when you have your own real data (robot sensors, production series,
+    Use this when you have your own real data (wearable sensors, production series,
     gait recordings) and want to stress-test a model against controlled noise.
-    当你有自己的真实数据（机器人传感器、生产序列、步态录制）并想用受控噪声
+    当你有自己的真实数据（可穿戴传感器、生产序列、步态录制）并想用受控噪声
     对模型进行压力测试时使用。
 
     Args:
@@ -101,10 +103,11 @@ def build_empirical_dgp_bank(values, **kw) -> "DGPBank":
         包含一个轨迹抽取（你的数据）和冻结噪声抽取的 DGPBank。
 
     Example / 示例:
-        >>> bank = build_empirical_dgp_bank(my_array, name="robot_gait")
+        >>> bank = build_empirical_dgp_bank(my_array, name="wearable_gait")
         >>> split = inject_noise(bank, sigma=0.5, sigma_scale="train_std")
     """
     from .api import build_empirical_dgp_bank as _build_empirical_dgp_bank
+
     return _build_empirical_dgp_bank(values, **kw)
 
 
@@ -136,6 +139,7 @@ def inject_noise(bank, **kw) -> "SplitTimeSeriesData":
         >>> split.train_stats.std       # array([12.3, 8.7, 9.1])
     """
     from .api import inject_noise as _inject_noise
+
     return _inject_noise(bank, **kw)
 
 
@@ -149,6 +153,7 @@ def export_dgp_bank_files(bank, out_dir, **kw) -> dict[str, object]:
     manifest.json 以供检查和可复现性审查。
     """
     from .api import export_dgp_bank_files as _export_dgp_bank_files
+
     return _export_dgp_bank_files(bank, out_dir, **kw)
 
 
@@ -158,23 +163,59 @@ def export_dgp_bank_files(bank, out_dir, **kw) -> dict[str, object]:
 
 if TYPE_CHECKING:
     from .data import SplitTimeSeriesData, SourceKind, TimeSeriesData
-    from .pipeline import DataBundle, KnownDataID, KnownMeta, PartitionSpec, DrawDesign, TitrationPlan
+    from .pipeline import (
+        DataBundle,
+        KnownDataID,
+        KnownMeta,
+        PartitionSpec,
+        DrawDesign,
+        TitrationPlan,
+    )
     from .specs import ShockEvent, ShockSchedule, ShockType, TitrationCell, TrajectorySpec, DGPBank
     from .api import build_clean_split_bundle, build_noisy_bundle_for_cell, iter_cells
 
 
 def __getattr__(name: str):
-    if name in {"TrajectorySpec", "DGPBank", "TitrationCell", "ShockEvent", "ShockSchedule", "ShockType"}:
+    if name in {
+        "TrajectorySpec",
+        "DGPBank",
+        "TitrationCell",
+        "ShockEvent",
+        "ShockSchedule",
+        "ShockType",
+    }:
         from . import specs as _specs
+
         return getattr(_specs, name)
-    if name in {"TimeSeriesData", "SplitTimeSeriesData", "KnownLoadMode", "SourceKind", "KnownCleanConfig"}:
+    if name in {
+        "TimeSeriesData",
+        "SplitTimeSeriesData",
+        "KnownLoadMode",
+        "SourceKind",
+        "KnownCleanConfig",
+    }:
         from . import data as _data
+
         return getattr(_data, name)
-    if name in {"DataBundle", "KnownDataID", "KnownMeta", "PartitionSpec", "DrawDesign", "TitrationPlan"}:
+    if name in {
+        "DataBundle",
+        "KnownDataID",
+        "KnownMeta",
+        "PartitionSpec",
+        "DrawDesign",
+        "TitrationPlan",
+    }:
         from . import pipeline as _pipeline
+
         return getattr(_pipeline, name)
-    if name in {"iter_cells", "build_clean_split_bundle", "build_noisy_bundle_for_cell", "export_dgp_bank_files"}:
+    if name in {
+        "iter_cells",
+        "build_clean_split_bundle",
+        "build_noisy_bundle_for_cell",
+        "export_dgp_bank_files",
+    }:
         from . import api as _api
+
         return getattr(_api, name)
     raise AttributeError(f"module 'serie' has no attribute {name!r}")
 

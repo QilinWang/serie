@@ -19,6 +19,7 @@ This file covers the gaps between those two:
    10. Export with multiple sigmas
    11. SplitTimeSeriesData slicing vs manual index math
 """
+
 from __future__ import annotations
 
 import json
@@ -66,9 +67,12 @@ class TestPartitionSpecFields:
 
     def test_custom_partition_round_trips(self):
         p = PartitionSpec(
-            train_start=0.0, train_end=0.6,
-            val_start=0.6, val_end=0.8,
-            test_start=0.8, test_end=1.0,
+            train_start=0.0,
+            train_end=0.6,
+            val_start=0.6,
+            val_end=0.8,
+            test_start=0.8,
+            test_end=1.0,
         )
         assert p.train_end == 0.6
         assert p.val_start == 0.6
@@ -167,9 +171,7 @@ class TestExtremeSigma:
         expected_neg = bank.clean[0] - 0.5 * bank.noise_draws[0]
         np.testing.assert_array_equal(neg, expected_neg)
         # and the pair should be symmetric around clean
-        np.testing.assert_allclose(
-            (pos + neg) / 2, bank.clean[0], rtol=1e-5, atol=1e-5
-        )
+        np.testing.assert_allclose((pos + neg) / 2, bank.clean[0], rtol=1e-5, atol=1e-5)
 
     def test_very_large_sigma_still_finite(self):
         bank = build_dgp_bank(small_lorenz(), seed=0, verbose=False)
@@ -209,9 +211,7 @@ class TestBurnIn:
         assert bank_no.T == 501
         assert bank_yes.T == 401
         # The burned bank's first row should match the non-burned bank at index 100
-        np.testing.assert_allclose(
-            bank_yes.clean[0, 0], bank_no.clean[0, 100], rtol=1e-5
-        )
+        np.testing.assert_allclose(bank_yes.clean[0, 0], bank_no.clean[0, 100], rtol=1e-5)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -278,18 +278,22 @@ class TestGradualTransition:
         # Before the shock, all three should be identical
         shock_idx = int(0.3 * bank_base.T)
         np.testing.assert_array_equal(
-            bank_base.clean[0, :shock_idx - 2],
-            bank_abrupt.clean[0, :shock_idx - 2],
+            bank_base.clean[0, : shock_idx - 2],
+            bank_abrupt.clean[0, : shock_idx - 2],
         )
         np.testing.assert_array_equal(
-            bank_base.clean[0, :shock_idx - 2],
-            bank_gradual.clean[0, :shock_idx - 2],
+            bank_base.clean[0, : shock_idx - 2],
+            bank_gradual.clean[0, : shock_idx - 2],
         )
 
         # After the transition window, both diverge from baseline
         post_idx = int(0.7 * bank_base.T)
-        abrupt_div = float(np.abs(bank_abrupt.clean[0, post_idx:] - bank_base.clean[0, post_idx:]).mean())
-        gradual_div = float(np.abs(bank_gradual.clean[0, post_idx:] - bank_base.clean[0, post_idx:]).mean())
+        abrupt_div = float(
+            np.abs(bank_abrupt.clean[0, post_idx:] - bank_base.clean[0, post_idx:]).mean()
+        )
+        gradual_div = float(
+            np.abs(bank_gradual.clean[0, post_idx:] - bank_base.clean[0, post_idx:]).mean()
+        )
         assert abrupt_div > 0.01
         assert gradual_div > 0.01
 

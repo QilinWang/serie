@@ -11,6 +11,7 @@ Test matrix:
     Shock modes:  no_shock, param_shock, state_shock
 
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -53,8 +54,14 @@ DT = 0.01
 def _np_ode(system_name, x0, steps, dt, params, schedule=None):
     spec = SYSTEMS[system_name]
     return _run_ode_py(
-        f=spec.f_py, x0=x0, steps=steps, dt=dt, t0=0.0,
-        params=params, method="rk4", time_dependent=spec.time_dependent,
+        f=spec.f_py,
+        x0=x0,
+        steps=steps,
+        dt=dt,
+        t0=0.0,
+        params=params,
+        method="rk4",
+        time_dependent=spec.time_dependent,
         schedule=schedule,
     )
 
@@ -68,8 +75,9 @@ def _rk4_step(f, x: np.ndarray, dt: float, params) -> np.ndarray:
     return x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 
-def _estimate_lorenz_largest_lyapunov(*, steps=20_000, burn_steps=1_000,
-                                      dt=0.01, delta0=1e-7) -> float:
+def _estimate_lorenz_largest_lyapunov(
+    *, steps=20_000, burn_steps=1_000, dt=0.01, delta0=1e-7
+) -> float:
     # Largest Lyapunov exponent = exponential rate at which two trajectories
     # starting delta0 apart pull apart. Positive => chaos. Benettin method:
     # advance both, measure growth, then RESCALE the separation back to delta0
@@ -78,22 +86,20 @@ def _estimate_lorenz_largest_lyapunov(*, steps=20_000, burn_steps=1_000,
     params = LorenzParams(sigma=10.0, rho=28.0, beta=8.0 / 3.0)
     x = np.array([1.0, 0.98, 1.1], dtype=np.float64)
     direction = np.array([0.3, -0.4, 0.5], dtype=np.float64)
-    direction *= delta0 / np.linalg.norm(direction)   # tiny initial separation
+    direction *= delta0 / np.linalg.norm(direction)  # tiny initial separation
     y = x + direction
     log_growth, n = 0.0, 0
     for i in range(steps):
         x = _rk4_step(f, x, dt, params)
         y = _rk4_step(f, y, dt, params)
         diff = y - x
-        dist = float(np.linalg.norm(diff))            # how far they've drifted
-        if i >= burn_steps:                           # skip the transient
-            log_growth += np.log(dist / delta0)       # one step of exp-growth
+        dist = float(np.linalg.norm(diff))  # how far they've drifted
+        if i >= burn_steps:  # skip the transient
+            log_growth += np.log(dist / delta0)  # one step of exp-growth
             n += 1
-        y = x + (delta0 / dist) * diff                # renormalize back to delta0
-    return log_growth / (n * dt)                      # average rate per unit time
+        y = x + (delta0 / dist) * diff  # renormalize back to delta0
+    return log_growth / (n * dt)  # average rate per unit time
     # classic Lorenz ~ 0.9056; ours ~0.914 (finite-dt bias is normal)
-
-
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -238,7 +244,7 @@ class TestPythonShock:
         # Pre-shock identical
         np.testing.assert_array_equal(baseline[:shock_step], shocked[:shock_step])
         # Post-shock differs
-        assert np.max(np.abs(baseline[shock_step + 10:] - shocked[shock_step + 10:])) > 1e-6
+        assert np.max(np.abs(baseline[shock_step + 10 :] - shocked[shock_step + 10 :])) > 1e-6
 
     def test_lorenz_state_shock_differs(self):
         x0 = np.array([1.0, 0.98, 1.1])
@@ -250,7 +256,7 @@ class TestPythonShock:
         shocked = _np_ode("lorenz", x0, STEPS, DT, params, schedule=schedule)
 
         np.testing.assert_array_equal(baseline[:shock_step], shocked[:shock_step])
-        assert np.max(np.abs(baseline[shock_step + 1:] - shocked[shock_step + 1:])) > 1.0
+        assert np.max(np.abs(baseline[shock_step + 1 :] - shocked[shock_step + 1 :])) > 1.0
 
     def test_public_multi_state_schedule_applies_both_perturbations(self):
         base = TrajectorySpec.lorenz(steps=500, burn_in=0)
@@ -319,13 +325,32 @@ class TestPresets:
 
     def test_all_active_presets_construct(self):
         from serie.catalog import (
-            lorenz_spec, rossler_spec, chua_spec, lorenz96_spec,
-            ou_spec, doublewell_spec, slds_spec, seasonal_ar_spec,
-            garch_spec, ks_spec, diagonal_spec,
+            lorenz_spec,
+            rossler_spec,
+            chua_spec,
+            lorenz96_spec,
+            ou_spec,
+            doublewell_spec,
+            slds_spec,
+            seasonal_ar_spec,
+            garch_spec,
+            ks_spec,
+            diagonal_spec,
         )
-        for fn in [lorenz_spec, rossler_spec, chua_spec, lorenz96_spec,
-                    ou_spec, doublewell_spec, slds_spec, seasonal_ar_spec,
-                    garch_spec, ks_spec, diagonal_spec]:
+
+        for fn in [
+            lorenz_spec,
+            rossler_spec,
+            chua_spec,
+            lorenz96_spec,
+            ou_spec,
+            doublewell_spec,
+            slds_spec,
+            seasonal_ar_spec,
+            garch_spec,
+            ks_spec,
+            diagonal_spec,
+        ]:
             spec = fn()
             assert spec.steps > 0
             assert spec.dim > 0
@@ -333,23 +358,34 @@ class TestPresets:
 
     def test_shock_presets_construct(self):
         from serie.catalog import (
-            lorenz_param_shock_spec, lorenz_state_shock_spec, lorenz_switch_spec,
+            lorenz_param_shock_spec,
+            lorenz_state_shock_spec,
+            lorenz_switch_spec,
             rossler_param_shock_spec,
-            chua_param_shock_spec, chua_switch_spec,
+            chua_param_shock_spec,
+            chua_switch_spec,
             ou_param_shock_spec,
-            doublewell_param_shock_spec, doublewell_switch_spec,
-            slds_param_shock_spec, slds_switch_spec,
+            doublewell_param_shock_spec,
+            doublewell_switch_spec,
+            slds_param_shock_spec,
+            slds_switch_spec,
             seasonal_ar_param_shock_spec,
             garch_param_shock_spec,
             ks_param_shock_spec,
         )
+
         shock_fns = [
-            lorenz_param_shock_spec, lorenz_state_shock_spec, lorenz_switch_spec,
+            lorenz_param_shock_spec,
+            lorenz_state_shock_spec,
+            lorenz_switch_spec,
             rossler_param_shock_spec,
-            chua_param_shock_spec, chua_switch_spec,
+            chua_param_shock_spec,
+            chua_switch_spec,
             ou_param_shock_spec,
-            doublewell_param_shock_spec, doublewell_switch_spec,
-            slds_param_shock_spec, slds_switch_spec,
+            doublewell_param_shock_spec,
+            doublewell_switch_spec,
+            slds_param_shock_spec,
+            slds_switch_spec,
             seasonal_ar_param_shock_spec,
             garch_param_shock_spec,
             ks_param_shock_spec,
@@ -363,6 +399,7 @@ class TestPresets:
         """TrajectorySpec.lorenz() should produce the same result as lorenz_spec()."""
         from serie.specs import TrajectorySpec
         from serie.catalog import lorenz_spec
+
         a = TrajectorySpec.lorenz()
         b = lorenz_spec()
         assert a.system == b.system
@@ -380,6 +417,7 @@ class TestGenerateFromTrajectorySpec:
     def test_lorenz_e2e(self):
         from serie.catalog import lorenz_spec
         from serie.integrators import generate_from_trajectory_spec
+
         spec = lorenz_spec(steps=1000)
         traj = generate_from_trajectory_spec(spec, seed=0)
         assert traj.shape == (1001, 3)
@@ -389,6 +427,7 @@ class TestGenerateFromTrajectorySpec:
     def test_ou_e2e(self):
         from serie.catalog import ou_spec
         from serie.integrators import generate_from_trajectory_spec
+
         spec = ou_spec(steps=1000)
         traj = generate_from_trajectory_spec(spec, seed=42)
         assert traj.shape == (1001, 1)
@@ -402,13 +441,12 @@ class TestGenerateFromTrajectorySpec:
         # an AR(1):  x[n+1] = (1 - theta*dt) x[n] + sigma*sqrt(dt)*eps[n].
         # "Correct" for a stochastic system = the right LONG-RUN distribution.
         # AR(1) stationary variance = b^2/(1-a^2) with a=1-theta*dt, b=sigma*sqrt(dt):
-        spec = ou_spec(steps=30_000, burn_in=5_000)        # burn_in: reach stationarity
+        spec = ou_spec(steps=30_000, burn_in=5_000)  # burn_in: reach stationarity
         traj = generate_from_trajectory_spec(spec, seed=42, dtype=np.float64)[:, 0]
         p = spec.params
         expected = (p.sigma_noise**2 * spec.dt) / (1.0 - (1.0 - p.theta * spec.dt) ** 2)
-        assert abs(float(traj.mean()) - p.mu) < 0.05       # mean-reverts to mu
-        assert 0.85 * expected < float(traj.var()) < 1.15 * expected   # right spread
-
+        assert abs(float(traj.mean()) - p.mu) < 0.05  # mean-reverts to mu
+        assert 0.85 * expected < float(traj.var()) < 1.15 * expected  # right spread
 
     def test_doublewell_e2e(self):
         from serie.catalog import doublewell_spec
@@ -459,6 +497,7 @@ class TestGenerateFromTrajectorySpec:
     def test_slds_e2e(self):
         from serie.catalog import slds_spec
         from serie.integrators import generate_from_trajectory_spec
+
         spec = slds_spec(steps=1000)
         traj = generate_from_trajectory_spec(spec, seed=42)
         assert traj.shape == (1001, 1)

@@ -69,7 +69,11 @@ def bake(
         "draws": draws.tolist(),
     }
 
-    output = Path(out_path) if out_path is not None else Path(__file__).resolve().parent / "public" / "attractor_data.json"
+    output = (
+        Path(out_path)
+        if out_path is not None
+        else Path(__file__).resolve().parent / "public" / "attractor_data.json"
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload), encoding="utf-8")
     print(f"baked {clean.shape[0]} points x {draws.shape[0]} draws -> {output}")

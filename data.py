@@ -8,6 +8,7 @@ SplitTimeSeriesData — partitioned series + split stats, from inject_noise()
 load_data(source)   — dispatch: TrajectorySpec → synthetic, KnownMeta → recorded
                       分发：TrajectorySpec → 合成，KnownMeta → 录制
 """
+
 from __future__ import annotations
 
 from enum import StrEnum, auto
@@ -50,6 +51,7 @@ class KnownCleanConfig:
     impute_short_runs: bool = True
     drop_col_threshold: float = 0.2
     drop_col_longrun_hours: int = 24 * 7
+
 
 @define(frozen=True, slots=True, eq=False)
 class TimeSeriesData:
@@ -225,13 +227,10 @@ def load_known_data(
     )
 
     if mode == KnownLoadMode.CLEAN:
-        db = (
-            DataBundle()
-            | StageLoadKnownCSV(
-                dataset_id=known_meta.dataset_id,
-                known_meta=known_meta,
-                save_ipc=cfg.save_ipc,
-            )
+        db = DataBundle() | StageLoadKnownCSV(
+            dataset_id=known_meta.dataset_id,
+            known_meta=known_meta,
+            save_ipc=cfg.save_ipc,
         )
         if cfg.keep_cols is not None or cfg.keep_col_idx is not None:
             db = db | StageSelectColumns(
@@ -251,13 +250,10 @@ def load_known_data(
             )
         db = db | StageConvertToNumpy()
     elif mode == KnownLoadMode.RAW:
-        db = (
-            DataBundle()
-            | StageLoadKnownCSV(
-                dataset_id=known_meta.dataset_id,
-                known_meta=known_meta,
-                save_ipc=cfg.save_ipc,
-            )
+        db = DataBundle() | StageLoadKnownCSV(
+            dataset_id=known_meta.dataset_id,
+            known_meta=known_meta,
+            save_ipc=cfg.save_ipc,
         )
         if cfg.keep_cols is not None or cfg.keep_col_idx is not None:
             db = db | StageSelectColumns(

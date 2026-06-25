@@ -57,7 +57,7 @@ Useful options:
 - `--sigma-scale unit|train_std`: raw unit noise or train-std-scaled noise.
 - `--partition`: split convention, such as `p70_20_10`.
 - `--out`: write artifacts to a directory.
-- `--array-format none|npy|csv|both`: choose array outputs.
+- `--array-format none|npy|csv|ipc|parquet|table|all`: choose array outputs.
 - `--plot none|timeseries|attractor|both`: choose figure outputs.
 - `--overwrite`: replace an existing output directory.
 
@@ -65,7 +65,7 @@ Example with files:
 
 ```bash
 serie generate lorenz --shock param --sigma 0.1 \
-  --out tmp/lorenz_cell --array-format both --plot both \
+  --out tmp/lorenz_cell --array-format all --plot both \
   --overwrite --format json
 ```
 
@@ -80,7 +80,8 @@ serie demo lorenz --out tmp/lorenz_demo.html --overwrite
 serie walkthrough --out tmp/walkthrough --overwrite --format json
 ```
 
-`demo` writes a self-contained HTML file for `lorenz`, `rossler`, or `chua`.
+`demo` writes a self-contained HTML file for `lorenz`, `rossler`, `chua`,
+`vanderpol`, `henon`, or `logistic`.
 `walkthrough` writes a fuller audit with arrays, manifests, and figures.
 
 ## Concepts To Preserve
@@ -102,6 +103,13 @@ Keep changes scoped to the public data layer. Do not move Fern trainer,
 dashboard, run-result, or checkpoint concepts back into SERIE.
 
 Use `just ci-check` before handing work back. It runs Ruff, Pyright, and pytest.
+
+For browser-template work, use `just dev-demo-template` to rebuild
+`demo_dist/`, then `just dev-demo-inspect` to write ignored inspection HTML/JSON
+files under `tmp/candidate_demos/`. Vite/esbuild has repeatedly hung inside the
+Codex filesystem sandbox; if a sandboxed `bun run build` stalls after printing
+`vite build`, rerun the Justfile recipe or `bun run build` outside the sandbox
+instead of debugging frontend code that has not actually failed.
 
 The maintainer may use Nushell or Fish interactively, but repo commands should
 stay shell-simple. Put repeatable logic in `Justfile`, Python scripts, or CI

@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -36,11 +36,11 @@ jobs:
         run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" pyright
 
       - name: Pytest
-        if: matrix.python-version != '3.12'
+        if: matrix.python-version != '3.14'
         run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q
 
       - name: Pytest with coverage
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.14'
         run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q --cov --cov-report=term-missing --cov-report=xml
 
   build-wheel:
@@ -49,7 +49,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -57,7 +57,7 @@ jobs:
           enable-cache: true
 
       - name: Install Python
-        run: uv python install 3.12
+        run: uv python install 3.14
 
       - name: Build distributions
         run: uv build . --out-dir dist

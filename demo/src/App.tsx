@@ -32,11 +32,33 @@ export default function App() {
   const [showNoisy, setShowNoisy] = useState(true);
   const [drawIndex, setDrawIndex] = useState(0);
 
+  const loadDemoData = (payload: unknown) => {
+    if (!isDemoData(payload)) {
+      throw new Error("JSON does not match the SERIE demo-data contract");
+    }
+    setLoadState({ status: "ready", data: payload });
+    setDrawIndex(0);
+    setSigma(0.24);
+    setShowNoisy(payload.draws.length > 0);
+  };
+
+  const handleLoadDataFile = (file: File) => {
+    file
+      .text()
+      .then((text) => {
+        loadDemoData(JSON.parse(text) as unknown);
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setLoadState({ status: "error", message });
+      });
+  };
+
   useEffect(() => {
     let cancelled = false;
     const inlineData = window.__SERIE_DEMO_DATA__;
     if (isDemoData(inlineData)) {
-      setLoadState({ status: "ready", data: inlineData });
+      loadDemoData(inlineData);
       return () => {
         cancelled = true;
       };
@@ -50,11 +72,8 @@ export default function App() {
         return response.json();
       })
       .then((payload: unknown) => {
-        if (!isDemoData(payload)) {
-          throw new Error("attractor_data.json does not match the SERIE demo contract");
-        }
         if (!cancelled) {
-          setLoadState({ status: "ready", data: payload });
+          loadDemoData(payload);
         }
       })
       .catch((error: unknown) => {
@@ -88,7 +107,7 @@ export default function App() {
             <h1 className="mt-2 text-xl font-semibold text-white">Bake the SERIE JSON first.</h1>
             <p className="mt-3 text-sm leading-6 text-red-100/80">{loadState.message}</p>
             <code className="mt-4 block rounded-md bg-black/40 px-3 py-2 text-left text-xs text-red-50">
-              bun run bake
+              serie demo lorenz --data-out lorenz.json --out lorenz.html
             </code>
           </div>
         </div>
@@ -120,9 +139,12 @@ export default function App() {
               nDraws={data.draws.length}
               drawIndex={effectiveDrawIndex}
               hasNoiseDraws={data.draws.length > 0}
+              sourceDim={data.source_dim}
+              projection={data.projection}
               onSigmaChange={setSigma}
               onShowNoisyChange={setShowNoisy}
               onDrawIndexChange={setDrawIndex}
+              onLoadDataFile={handleLoadDataFile}
             />
           </div>
         </div>

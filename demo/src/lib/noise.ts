@@ -3,6 +3,8 @@ export type Point3 = [number, number, number];
 export type DemoData = {
   system: string;
   seed: number;
+  source_dim?: number;
+  projection?: string;
   feature_names: string[];
   dt: number;
   n_points: number;

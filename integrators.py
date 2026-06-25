@@ -69,6 +69,7 @@ from attrs import AttrsInstance, astuple
 @attr.define(frozen=True, slots=True)
 class ParamChangeEvent:
     """Switch to a different parameter set at a specific timestep."""
+
     step: int
     param_set_idx: int  # index into StepShockSchedule.param_sets
 
@@ -90,6 +91,7 @@ def _interpolate_scalar(before: float, after: float, alpha: float) -> float:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # parameter stepped-transition values
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def _transition_field_names(params: AttrsInstance) -> tuple[str, ...]:
     """Names of the fields that are allowed to move during a param transition.
@@ -116,7 +118,9 @@ def _transition_field_values(params: AttrsInstance) -> tuple[float, ...]:
     if isinstance(params, DiagonalParams):
         return tuple(float(value) for value in params.eigenvalues)
 
-    return tuple(float(getattr(params, field_name)) for field_name in _transition_field_names(params))
+    return tuple(
+        float(getattr(params, field_name)) for field_name in _transition_field_names(params)
+    )
 
 
 def _params_with_transition_field_values(
@@ -177,11 +181,11 @@ class StepShockSchedule:
 
     def __attrs_post_init__(self):
         steps = [e.step for e in self.events]
-        if steps != sorted(steps): # Validate sorted by step
+        if steps != sorted(steps):  # Validate sorted by step
             raise ValueError("StepShockSchedule events must be sorted by step")
-        
-        n = len(self.param_sets) 
-        for e in self.events: # Validate param_set_idx in range
+
+        n = len(self.param_sets)
+        for e in self.events:  # Validate param_set_idx in range
             if isinstance(e, ParamChangeEvent) and not (0 <= e.param_set_idx < n):
                 raise ValueError(f"param_set_idx {e.param_set_idx} out of range [0, {n})")
 
@@ -253,6 +257,7 @@ class StepShockSchedule:
             param_sets=tuple(param_sets),
         )
 
+
 @attr.define(frozen=True, slots=True)
 class SwitchSpec:
     """Two-trajectory switch at a given step.
@@ -271,6 +276,7 @@ class SwitchSpec:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Integrators (inlined — these are only called by dispatchers below)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def _params_as_args(p: AttrsInstance) -> tuple:
     """intent/contract: convert attrs params to positional args in definition order."""
@@ -785,6 +791,7 @@ def _generate_ks_pure(
         schedule=schedule,
     )
 
+
 def _generate_switch_python_pure(
     *,
     total_steps: int,
@@ -913,6 +920,7 @@ def _generate_trajectory_pure(
         )
     raise ValueError(f"Unknown system: {system}")
 
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Public generation boundary
 #
@@ -922,6 +930,7 @@ def _generate_trajectory_pure(
 #   2. Dispatches to the right integrator (ODE/SDE/map/PDE/discrete)
 #   3. Applies burn-in truncation on the returned trajectory
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def generate_from_trajectory_spec(
     trajectory_spec: TrajectorySpec,
@@ -934,6 +943,9 @@ def generate_from_trajectory_spec(
         raise ValueError("seed must be provided explicitly (no defaults).")
 
     system = trajectory_spec.system.value
+    # Historical registry key without underscores; keep enum spelling stable.
+    if system == "van_der_pol":
+        system = "vanderpol"
     all_systems = set(SYSTEMS.keys()) | DISCRETE_SYSTEMS | {"ks"}
     if system not in all_systems:
         raise ValueError(f"Unknown system: {system}. Known: {sorted(all_systems)}")
@@ -943,7 +955,9 @@ def generate_from_trajectory_spec(
     if trajectory_spec.burn_in < 0:
         raise ValueError("burn_in must be >= 0")
     if trajectory_spec.burn_in >= trajectory_spec.steps:
-        raise ValueError(f"burn_in ({trajectory_spec.burn_in}) must be < steps ({trajectory_spec.steps})")
+        raise ValueError(
+            f"burn_in ({trajectory_spec.burn_in}) must be < steps ({trajectory_spec.steps})"
+        )
 
     params_obj = trajectory_spec.params
     x0 = np.array(trajectory_spec.x0 or [0.1] * trajectory_spec.dim, dtype=np.float64)
@@ -993,7 +1007,9 @@ def generate_from_trajectory_spec(
                     raise ValueError("ODE_PARAMS shock requires params_after")
                 if not event.is_instantaneous:
                     if not (1 <= shock_step < total_steps):
-                        raise ValueError(f"transition start step {shock_step} not in [1, {total_steps - 1}]")
+                        raise ValueError(
+                            f"transition start step {shock_step} not in [1, {total_steps - 1}]"
+                        )
                     # Ensure a non-empty transition window after float->int conversion.
                     transition_end_step = min(total_steps, max(shock_step + 1, shock_end_step))
                     total_transition_steps = transition_end_step - shock_step
@@ -1041,7 +1057,9 @@ def generate_from_trajectory_spec(
                 )
             elif event.shocktype == ShockType.TRAJECTORY_SWITCH:
                 if len(trajectory_spec.shocks.events) > 1:
-                    raise ValueError("TRAJECTORY_SWITCH shocks cannot be combined with other events")
+                    raise ValueError(
+                        "TRAJECTORY_SWITCH shocks cannot be combined with other events"
+                    )
                 if not event.is_instantaneous:
                     raise ValueError("TRAJECTORY_SWITCH shock must be instantaneous")
                 if not (0 <= shock_step <= total_steps):
@@ -1050,7 +1068,9 @@ def generate_from_trajectory_spec(
                     raise ValueError("TRAJECTORY_SWITCH shock requires ic_b")
                 ic_b = np.array(event.ic_b, dtype=np.float64)
                 if ic_b.size != dim:
-                    raise ValueError(f"trajectory switch ic_b must have size {dim}; got {ic_b.size}")
+                    raise ValueError(
+                        f"trajectory switch ic_b must have size {dim}; got {ic_b.size}"
+                    )
                 p_b = event.params_after if event.params_after is not None else params_obj
                 switch = SwitchSpec(
                     switch_step=shock_step,

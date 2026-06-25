@@ -1,4 +1,5 @@
 """Split diagnostics — compute reports, render Rich tables, pipeline stage."""
+
 from __future__ import annotations
 
 import logging
@@ -81,7 +82,10 @@ class DriftReport:
 
     @property
     def has_drift(self) -> bool:
-        return abs(self.std_ratio_val - 1.0) > self.drift_thr_ratio or abs(self.std_ratio_test - 1.0) > self.drift_thr_ratio
+        return (
+            abs(self.std_ratio_val - 1.0) > self.drift_thr_ratio
+            or abs(self.std_ratio_test - 1.0) > self.drift_thr_ratio
+        )
 
 
 @define(frozen=True, slots=True)
@@ -191,7 +195,11 @@ def render_counts(r: CountsReport) -> "Table":
     tbl.add_column("Split", style="bold")
     tbl.add_column("Count", justify="right")
     tbl.add_column("Fraction", justify="right")
-    for name, count, color in [("Train", r.train, "green"), ("Val", r.val, "yellow"), ("Test", r.test, "red")]:
+    for name, count, color in [
+        ("Train", r.train, "green"),
+        ("Val", r.val, "yellow"),
+        ("Test", r.test, "red"),
+    ]:
         tbl.add_row(Text(name, style=color), f"{count:,}", f"{count / r.total:.1%}")
     tbl.add_row("Total", f"{r.total:,}", "1.000", style="dim")
 
@@ -252,7 +260,11 @@ def render_health(report: HealthReport, console: "Console | None" = None) -> "Ta
     tbl.add_column("Channels")
     tbl.add_row("Heavy tails", str(report.n_heavy), _ex(report.heavy_channels))
     tbl.add_row("Near constant", str(report.n_const), _ex(report.const_channels))
-    tbl.add_row(f"Sparse (>{report.sparse_thr:.0%} zeros)", str(report.n_sparse), _ex(report.sparse_channels))
+    tbl.add_row(
+        f"Sparse (>{report.sparse_thr:.0%} zeros)",
+        str(report.n_sparse),
+        _ex(report.sparse_channels),
+    )
 
     if console:
         console.print(tbl)
@@ -267,7 +279,9 @@ def render_drift(r: DriftReport) -> "Table":
         return "red bold" if abs(ratio - 1.0) > r.drift_thr_ratio else ""
 
     status = "✓" if not r.has_drift else "⚠ drift"
-    tbl = Table(title=f"Cross-Split Drift (ref: Train)  [{status}]", show_edge=False, pad_edge=False)
+    tbl = Table(
+        title=f"Cross-Split Drift (ref: Train)  [{status}]", show_edge=False, pad_edge=False
+    )
     tbl.add_column("Metric")
     tbl.add_column("Val", justify="right")
     tbl.add_column("Test", justify="right")

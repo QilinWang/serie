@@ -97,7 +97,7 @@ def test_unit_scale_injection_is_linear_for_many_sigmas(
     Hypothesis tries many positive and negative sigma values and many noise
     roots; the expected array is still the same simple equation every time.
     """
-    values = (np.arange(60, dtype=np.float32).reshape(30, 2) / 10.0)
+    values = np.arange(60, dtype=np.float32).reshape(30, 2) / 10.0
     bank = build_empirical_dgp_bank(
         values,
         name="property_linear",

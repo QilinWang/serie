@@ -157,8 +157,8 @@ class TestInjection:
 class TestPrepareFromArray:
     def test_clean_recording_becomes_dgp_bank(self):
         values = np.arange(24, dtype=np.float32).reshape(12, 2)
-        bank = build_empirical_dgp_bank(values, name="robot_gait", feature_names=("x", "y"))
-        assert bank.name == "robot_gait"
+        bank = build_empirical_dgp_bank(values, name="wearable_gait", feature_names=("x", "y"))
+        assert bank.name == "wearable_gait"
         assert bank.clean.shape == (1, 12, 2)
         assert bank.feature_names == ("x", "y")
         np.testing.assert_array_equal(bank.clean[0], values)
@@ -199,9 +199,7 @@ class TestNoiseKinds:
         assert a.noise_kind == "gaussian"
 
     def test_laplace_draws_have_unit_variance(self):
-        bank = build_dgp_bank(
-            small_lorenz(steps=4000), seed=0, noise_kind="laplace", verbose=False
-        )
+        bank = build_dgp_bank(small_lorenz(steps=4000), seed=0, noise_kind="laplace", verbose=False)
         assert abs(float(bank.noise_draws.std()) - 1.0) < 0.05
         assert bank.noise_kind == "laplace"
         assert bank.noise_draws.dtype == np.float32
@@ -321,7 +319,9 @@ class TestCommonRandomNumbers:
             small_ou(), seed=0, n_trajectory_draws=2, n_noise_draws=2, verbose=False
         )
         sigma = 0.5
-        noisy = bank.build_observed_series(noise_level=sigma, trajectory_draw_ordinal=1, noise_draw_ordinal=1)
+        noisy = bank.build_observed_series(
+            noise_level=sigma, trajectory_draw_ordinal=1, noise_draw_ordinal=1
+        )
         expected = bank.clean[1] + sigma * bank.noise_draws[1]
         np.testing.assert_array_equal(noisy, expected)
 
@@ -360,9 +360,7 @@ class TestPartition:
 
     def test_gap_partition_skips_boundary(self):
         bank = build_dgp_bank(small_lorenz(steps=1000), seed=0, verbose=False)
-        split = inject_noise(
-            bank, sigma=0.0, partition=PartitionSpec.p70_gap_10_20()
-        )
+        split = inject_noise(bank, sigma=0.0, partition=PartitionSpec.p70_gap_10_20())
         # val starts at 71%, so train-end and val-start are not adjacent
         T = bank.T
         n_train = split.train_values.shape[0]
@@ -383,15 +381,36 @@ class TestPartition:
 class TestPartitionValidation:
     def test_overlapping_val_test_rejected(self):
         with pytest.raises(ValueError, match="bounds invalid"):
-            PartitionSpec(train_start=0.0, train_end=0.7, val_start=0.6, val_end=0.9, test_start=0.85, test_end=1.0)
+            PartitionSpec(
+                train_start=0.0,
+                train_end=0.7,
+                val_start=0.6,
+                val_end=0.9,
+                test_start=0.85,
+                test_end=1.0,
+            )
 
     def test_fraction_outside_unit_interval_rejected(self):
         with pytest.raises(ValueError):
-            PartitionSpec(train_start=0.0, train_end=1.5, val_start=1.5, val_end=1.6, test_start=1.6, test_end=2.0)
+            PartitionSpec(
+                train_start=0.0,
+                train_end=1.5,
+                val_start=1.5,
+                val_end=1.6,
+                test_start=1.6,
+                test_end=2.0,
+            )
 
     def test_empty_train_rejected(self):
         with pytest.raises(ValueError, match="Train bounds"):
-            PartitionSpec(train_start=0.5, train_end=0.5, val_start=0.5, val_end=0.8, test_start=0.8, test_end=1.0)
+            PartitionSpec(
+                train_start=0.5,
+                train_end=0.5,
+                val_start=0.5,
+                val_end=0.8,
+                test_start=0.8,
+                test_end=1.0,
+            )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -487,7 +506,10 @@ class TestProvenance:
         )
         titration_cells = list(iter_cells(bank, plan))
         assert len(titration_cells) == 2 * 2 * 2
-        cells = {(c.noise_level, c.trajectory_draw_ordinal, c.noise_draw_ordinal) for c in titration_cells}
+        cells = {
+            (c.noise_level, c.trajectory_draw_ordinal, c.noise_draw_ordinal)
+            for c in titration_cells
+        }
         assert len(cells) == 8  # no duplicates
 
     def test_deterministic_auto_uses_one_clean_path_and_many_noise_draws(self):
@@ -547,7 +569,11 @@ class TestProvenance:
             draw_design="trajectory_fixed",
         )
         cells = list(iter_cells(bank, plan))
-        assert [(c.trajectory_draw_ordinal, c.noise_draw_ordinal) for c in cells] == [(0, 0), (0, 1), (0, 2)]
+        assert [(c.trajectory_draw_ordinal, c.noise_draw_ordinal) for c in cells] == [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+        ]
 
     def test_clean_bundle_must_match_cell_trajectory_draw(self):
         bank = build_dgp_bank(
@@ -563,18 +589,20 @@ class TestProvenance:
         with pytest.raises(ValueError, match="draw mismatch"):
             build_noisy_bundle_for_cell(bank, db_clean, cell)
 
-    def test_export_dgp_bank_files_writes_arrays_csvs_and_manifest(self, tmp_path):
+    def test_export_dgp_bank_files_writes_arrays_tables_and_manifest(self, tmp_path):
         bank = build_dgp_bank(small_lorenz(), seed=0, verbose=False)
         out = tmp_path / "export"
         manifest = export_dgp_bank_files(bank, out, sigmas=(0.25,))
 
         assert manifest["schema"] == "serie.dgp_bank_file_export.v1"
-        assert manifest["array_format"] == "both"
+        assert manifest["array_format"] == "all"
         np.testing.assert_array_equal(np.load(out / "clean.npy"), bank.clean)
         np.testing.assert_array_equal(np.load(out / "noise_draws.npy"), bank.noise_draws)
         clean_csv = pl.read_csv(out / "clean.csv")
         assert clean_csv.columns == ["trajectory_draw_ordinal", "t", "f0", "f1", "f2"]
         assert clean_csv.height == bank.n_trajectory_draws * bank.T
+        assert pl.read_ipc(out / "clean.ipc").height == bank.n_trajectory_draws * bank.T
+        assert pl.read_parquet(out / "clean.parquet").height == bank.n_trajectory_draws * bank.T
 
         entry = manifest["noisy"][0]
         noisy = np.load(out / entry["files"]["npy"])
@@ -583,6 +611,8 @@ class TestProvenance:
         noisy_csv = pl.read_csv(out / entry["files"]["csv"])
         assert noisy_csv.columns == ["t", "f0", "f1", "f2"]
         assert noisy_csv.height == bank.T
+        assert pl.read_ipc(out / entry["files"]["ipc"]).height == bank.T
+        assert pl.read_parquet(out / entry["files"]["parquet"]).height == bank.T
 
         on_disk = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
         assert on_disk["noisy"][0]["cell_tag"] == entry["cell_tag"]
@@ -622,8 +652,7 @@ class TestProvenance:
         )
         post_mean_abs = np.mean(
             np.abs(
-                regular_bank.clean[0, shock_idx + 20 :]
-                - shifted_bank.clean[0, shock_idx + 20 :]
+                regular_bank.clean[0, shock_idx + 20 :] - shifted_bank.clean[0, shock_idx + 20 :]
             )
         )
         assert post_mean_abs > 1e-3

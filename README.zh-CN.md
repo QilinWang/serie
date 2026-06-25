@@ -200,8 +200,8 @@ serie generate lorenz --sigma 0.1 --format json
 serie commands --format json
 serie data-dir --format json
 serie inspect ou --format json
-serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz_cell --array-format both --plot both --overwrite --format json
-serie walkthrough --out tmp/walkthrough --array-format both --overwrite --format json
+serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz_cell --array-format all --plot both --overwrite --format json
+serie walkthrough --out tmp/walkthrough --array-format all --overwrite --format json
 ```
 
 ## 常用 CLI
@@ -243,7 +243,7 @@ serie generate ou --sigma 1.0 --sigma-scale train_std --format json
 - `--sigma-scale unit`：直接使用 `sigma`。
 - `--sigma-scale train_std`：按训练段每个通道的标准差缩放噪声，适合不同通道有不同物理单位的真实记录。这个模式目前用于切分元信息；如果要同时写数组或图，请使用 `--sigma-scale unit`。
 - `--out`：写文件的目录。不传 `--out` 时只打印 JSON 元信息。
-- `--array-format none|npy|csv|both`：写出数组和 `manifest.json`。
+- `--array-format none|npy|csv|ipc|parquet|table|all`：写出数组和 `manifest.json`。
 - `--plot none|timeseries|attractor|both`：写出静态图。
 
 旧的 `inject-noise`、`export`、`plot` 子命令仍然保留，主要用于兼容和底层检查；新用户从 `generate` 开始即可。
@@ -285,7 +285,7 @@ for sigma in [0.0, 0.1, 0.25, 0.5]:
 ```python
 from serie import build_empirical_dgp_bank, inject_noise
 
-bank = build_empirical_dgp_bank(values, name="robot_gait")
+bank = build_empirical_dgp_bank(values, name="wearable_gait")
 split = inject_noise(bank, sigma=1.0, sigma_scale="train_std")
 ```
 

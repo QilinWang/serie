@@ -11,9 +11,12 @@ type ControlsProps = {
   nDraws: number;
   drawIndex: number;
   hasNoiseDraws: boolean;
+  sourceDim?: number;
+  projection?: string;
   onSigmaChange: (sigma: number) => void;
   onShowNoisyChange: (show: boolean) => void;
   onDrawIndexChange: (index: number) => void;
+  onLoadDataFile: (file: File) => void;
 };
 
 export function Controls({
@@ -25,9 +28,12 @@ export function Controls({
   nDraws,
   drawIndex,
   hasNoiseDraws,
+  sourceDim,
+  projection,
   onSigmaChange,
   onShowNoisyChange,
   onDrawIndexChange,
+  onLoadDataFile,
 }: ControlsProps) {
   const drawOptions = Array.from({ length: nDraws }, (_, index) => index);
 
@@ -47,6 +53,26 @@ export function Controls({
         Drag to explore the clean attractor. Move the slider to add observation
         noise from the baked SERIE draw bank in natural unit scale.
       </p>
+
+      <div className="mt-5 rounded-md border border-white/10 bg-white/[0.04] px-3 py-2">
+        <label htmlFor="data-json" className="text-sm font-medium text-slate-100">
+          Load local JSON
+        </label>
+        <p className="mt-1 text-xs leading-5 text-slate-400">
+          Select a SERIE demo-data JSON file; it stays in this browser.
+        </p>
+        <input
+          id="data-json"
+          type="file"
+          accept="application/json,.json"
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            if (file) onLoadDataFile(file);
+            event.currentTarget.value = "";
+          }}
+          className="mt-2 block w-full text-xs text-slate-300 file:mr-3 file:rounded-md file:border-0 file:bg-cyan-200/15 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-cyan-100 hover:file:bg-cyan-200/25"
+        />
+      </div>
 
       <div className="mt-5 space-y-3">
         <div className="flex items-center justify-between text-sm">
@@ -124,6 +150,16 @@ export function Controls({
         <div className="rounded-md bg-white/[0.04] p-2">
           <dt className="text-slate-500">draws</dt>
           <dd className="mt-1 font-mono text-slate-100">{nDraws}</dd>
+        </div>
+        <div className="rounded-md bg-white/[0.04] p-2">
+          <dt className="text-slate-500">source dim</dt>
+          <dd className="mt-1 font-mono text-slate-100">{sourceDim ?? 3}</dd>
+        </div>
+        <div className="rounded-md bg-white/[0.04] p-2">
+          <dt className="text-slate-500">projection</dt>
+          <dd className="mt-1 truncate font-mono text-slate-100" title={projection ?? "native_3d"}>
+            {projection ?? "native_3d"}
+          </dd>
         </div>
       </dl>
     </Card>

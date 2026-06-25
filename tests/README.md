@@ -16,6 +16,7 @@ Use file names to show intent.
   renamed fields, shape validation, alias safety, feature-name flow, split
   slicing, and high-level edge cases.
 - `test_cli.py` — installed CLI behavior and JSON payloads.
+- `test_example.py` — executable smoke flow for the public Python API.
 - `test_known_data_boundary.py` — known-data files are not bundled and missing
   data errors are explicit.
 
@@ -29,6 +30,7 @@ Use file names to show intent.
 - Public API behavior that protects users from silent mistakes:
   `test_public_contracts.py`.
 - Command-line behavior: `test_cli.py`.
+- Public Python API smoke flow: `test_example.py`.
 - Known-recording packaging or local-data boundary: `test_known_data_boundary.py`.
 
 Prefer fast, explicit contract tests over broad slow sweeps. Slow visual or

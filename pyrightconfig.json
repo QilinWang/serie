@@ -6,7 +6,6 @@
     "cli.py",
     "data.py",
     "diagnostics.py",
-    "example.py",
     "integrators.py",
     "pipeline.py",
     "plots.py",

@@ -20,6 +20,7 @@ Layout (top to bottom):
     7. Noise stages   — StageInjectNoise, StageInjectTrainScaledNoise
     8. Diagnostics    — StagePrintDiagnostics (reports + renderers in diagnostics.py)
 """
+
 from __future__ import annotations
 
 import abc
@@ -102,43 +103,74 @@ class PartitionSpec:
     @classmethod
     def p70_10_20(cls):
         """70% train, 10% val, 20% test. 70%训练，10%验证，20%测试。"""
-        return cls(train_start=0.0, train_end=0.7, val_start=0.7, val_end=0.8, test_start=0.8, test_end=1.0)
+        return cls(
+            train_start=0.0, train_end=0.7, val_start=0.7, val_end=0.8, test_start=0.8, test_end=1.0
+        )
 
     @classmethod
     def p70_20_10(cls):
         """70% train, 20% val, 10% test. 70%训练，20%验证，10%测试。"""
-        return cls(train_start=0.0, train_end=0.7, val_start=0.7, val_end=0.9, test_start=0.9, test_end=1.0)
+        return cls(
+            train_start=0.0, train_end=0.7, val_start=0.7, val_end=0.9, test_start=0.9, test_end=1.0
+        )
 
     @classmethod
     def p60_20_20(cls):
         """60% train, 20% val, 20% test. 60%训练，20%验证，20%测试。"""
-        return cls(train_start=0.0, train_end=0.6, val_start=0.6, val_end=0.8, test_start=0.8, test_end=1.0)
+        return cls(
+            train_start=0.0, train_end=0.6, val_start=0.6, val_end=0.8, test_start=0.8, test_end=1.0
+        )
 
     @classmethod
     def p50_25_25(cls):
         """50% train, 25% val, 25% test. 50%训练，25%验证，25%测试。"""
-        return cls(train_start=0.0, train_end=0.5, val_start=0.5, val_end=0.75, test_start=0.75, test_end=1.0)
+        return cls(
+            train_start=0.0,
+            train_end=0.5,
+            val_start=0.5,
+            val_end=0.75,
+            test_start=0.75,
+            test_end=1.0,
+        )
 
     @classmethod
     def p60_15_25(cls):
         """60% train, 15% val, 25% test. 60%训练，15%验证，25%测试。"""
-        return cls(train_start=0.0, train_end=0.6, val_start=0.6, val_end=0.75, test_start=0.75, test_end=1.0)
+        return cls(
+            train_start=0.0,
+            train_end=0.6,
+            val_start=0.6,
+            val_end=0.75,
+            test_start=0.75,
+            test_end=1.0,
+        )
 
     @classmethod
     def p60_10_30(cls):
         """60% train, 10% val, 30% test. 60%训练，10%验证，30%测试。"""
-        return cls(train_start=0.0, train_end=0.6, val_start=0.6, val_end=0.7, test_start=0.7, test_end=1.0)
+        return cls(
+            train_start=0.0, train_end=0.6, val_start=0.6, val_end=0.7, test_start=0.7, test_end=1.0
+        )
 
     @classmethod
     def p50_10_40(cls):
         """50% train, 10% val, 40% test. 50%训练，10%验证，40%测试。"""
-        return cls(train_start=0.0, train_end=0.5, val_start=0.5, val_end=0.6, test_start=0.6, test_end=1.0)
+        return cls(
+            train_start=0.0, train_end=0.5, val_start=0.5, val_end=0.6, test_start=0.6, test_end=1.0
+        )
 
     @classmethod
     def p70_gap_10_20(cls):
         """70% train, 10% val, 20% test with small gaps between splits.
         70%训练，10%验证，20%测试，分割之间有小间隔。"""
-        return cls(train_start=0.0, train_end=0.7, val_start=0.71, val_end=0.81, test_start=0.82, test_end=1.0)
+        return cls(
+            train_start=0.0,
+            train_end=0.7,
+            val_start=0.71,
+            val_end=0.81,
+            test_start=0.82,
+            test_end=1.0,
+        )
 
 
 @define(slots=True, frozen=True)
@@ -180,7 +212,9 @@ class PartitionStats:
         elif method == "center_median":
             return self.median, np.ones_like(self.median, dtype=np.float32)
         elif method == "none":
-            return np.zeros_like(self.mean, dtype=np.float32), np.ones_like(self.std, dtype=np.float32)
+            return np.zeros_like(self.mean, dtype=np.float32), np.ones_like(
+                self.std, dtype=np.float32
+            )
         else:
             raise ValueError(f"Unknown normalization method: {method}")
 
@@ -345,11 +379,7 @@ class TitrationPlan:
     def _resolved_draw_design_from_flag(self, is_stochastic: bool) -> DrawDesign:
         if self.draw_design is not DrawDesign.AUTO:
             return self.draw_design
-        return (
-            DrawDesign.JOINT
-            if is_stochastic
-            else DrawDesign.NOISE_ONLY
-        )
+        return DrawDesign.JOINT if is_stochastic else DrawDesign.NOISE_ONLY
 
     def _require_available(self, bank: "DGPBank", *, n_trajectory: int, n_noise: int) -> None:
         if bank.n_trajectory_draws < n_trajectory:
@@ -358,8 +388,7 @@ class TitrationPlan:
             )
         if bank.n_noise_draws < n_noise:
             raise ValueError(
-                "bank has "
-                f"{bank.n_noise_draws} noise draws, but plan requires {n_noise}"
+                f"bank has {bank.n_noise_draws} noise draws, but plan requires {n_noise}"
             )
 
     def cell_count_per_sigma(self, *, is_stochastic: bool) -> int:
@@ -493,6 +522,7 @@ class KnownDataID(StrEnum):
     HUGADB_WALK_BICYCLING_SWITCH = auto()
     HUGADB_WALK_BICYCLING_SWITCH_OOD80 = auto()
 
+
 def known_data_root() -> Path:
     """Root for user-prepared known datasets.
 
@@ -522,7 +552,11 @@ _KNOWN_SOURCE_URLS: dict[KnownDataID, str] = {
 
 
 def _known_data_missing_message(meta: "KnownMeta", path: Path) -> str:
-    source_url = _KNOWN_SOURCE_URLS.get(meta.dataset_id) if isinstance(meta.dataset_id, KnownDataID) else None
+    source_url = (
+        _KNOWN_SOURCE_URLS.get(meta.dataset_id)
+        if isinstance(meta.dataset_id, KnownDataID)
+        else None
+    )
     details = [
         f"Known dataset {meta.source_id!r} is not bundled with the SERIE wheel.",
         f"Expected prepared IPC or CSV at: {path}",
@@ -555,7 +589,9 @@ class KnownMeta:
 
     # Fields with defaults
     universal_sentinels: list[float] = field(converter=list)
-    sentinels: dict[str, list[float]] = field(factory=dict)  # { column_name: [value1, value2, ...] }
+    sentinels: dict[str, list[float]] = field(
+        factory=dict
+    )  # { column_name: [value1, value2, ...] }
     impute_method: Literal["nearest", "linear"] = "linear"
 
     @property
@@ -793,7 +829,9 @@ class StageLoadKnownCSV(BundleStep):
         ipc_path = csv_path.with_suffix(".ipc")  # Feather/IPC format
 
         # === Try IPC cache first ===
-        if ipc_path.exists() and (not csv_path.exists() or ipc_path.stat().st_mtime >= csv_path.stat().st_mtime):
+        if ipc_path.exists() and (
+            not csv_path.exists() or ipc_path.stat().st_mtime >= csv_path.stat().st_mtime
+        ):
             # st_mtime is the file's modification time — the timestamp of when the file's contents were last changed.
             logger.debug("loading IPC cache: %s", ipc_path)
             df = pl.read_ipc(ipc_path)
@@ -850,7 +888,9 @@ class StageSelectColumns(BundleStep):
         df = db.df
 
         if (self.keep_cols is not None) and (self.keep_col_idx is not None):
-            raise ValueError("Provide only one of keep_cols or keep_col_idx")  # avoid ambiguous policy
+            raise ValueError(
+                "Provide only one of keep_cols or keep_col_idx"
+            )  # avoid ambiguous policy
 
         if self.keep_cols is not None:
             cols = list(self.keep_cols)
@@ -950,7 +990,15 @@ class StageImputeShortRuns(BundleStep):
         masked_df = df.with_columns(mask_exprs)
 
         # 3. Impute # Note: interpolate() is cleaner than the list comp loop
-        imputed_df = masked_df.with_columns([pl.col(c).interpolate(method=self.known_meta.impute_method).fill_null(strategy="forward").fill_null(strategy="backward") for c in cols])
+        imputed_df = masked_df.with_columns(
+            [
+                pl.col(c)
+                .interpolate(method=self.known_meta.impute_method)
+                .fill_null(strategy="forward")
+                .fill_null(strategy="backward")
+                for c in cols
+            ]
+        )
         logger.debug("imputed short runs on %s columns", len(cols))
         db.df = imputed_df
         db.feature_names = list(imputed_df.columns)
@@ -959,7 +1007,9 @@ class StageImputeShortRuns(BundleStep):
         return db
 
 
-def _detect_sentinel_runs(col_name: str, meta: KnownMeta, value_tol: float = 1e-6) -> tuple[pl.Expr, pl.Expr]:
+def _detect_sentinel_runs(
+    col_name: str, meta: KnownMeta, value_tol: float = 1e-6
+) -> tuple[pl.Expr, pl.Expr]:
     """
     === Run-length via change cumsum ===
     Example walkthrough:
@@ -974,11 +1024,17 @@ def _detect_sentinel_runs(col_name: str, meta: KnownMeta, value_tol: float = 1e-
     In our example: max([3,3,3,0,2,2,0]) = 3
     """
     # 1. Build Sentinel Condition
-    cond_list = [(pl.col(col_name) - pl.lit(v)).abs() <= value_tol for v in meta.universal_sentinels]
+    cond_list = [
+        (pl.col(col_name) - pl.lit(v)).abs() <= value_tol for v in meta.universal_sentinels
+    ]
     if meta.sentinels and (vals := meta.sentinels.get(col_name)):
         cond_list.extend([(pl.col(col_name) - pl.lit(v)).abs() <= value_tol for v in vals])
 
-    cond: pl.Expr = pl.lit(False) if not cond_list else pl.fold(acc=pl.lit(False), function=lambda acc, e: acc | e, exprs=cond_list)
+    cond: pl.Expr = (
+        pl.lit(False)
+        if not cond_list
+        else pl.fold(acc=pl.lit(False), function=lambda acc, e: acc | e, exprs=cond_list)
+    )
     # 2. Build Run-Length
     change: pl.Expr = (cond != cond.shift(1)).fill_null(True)
     grp: pl.Expr = change.cast(pl.Int32).cum_sum()

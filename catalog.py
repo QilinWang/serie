@@ -6,7 +6,11 @@ The preset function is the single source of canonical parameter values.
 
 This file is intentionally long. Local proximity beats file-size anxiety.
 If params + equations + presets describe the same system, they belong together.
+
+Stability notes, parameter sweep results, and per-system investigation
+findings are documented in ``docs/system_presets.md``.
 """
+
 from __future__ import annotations
 
 from enum import StrEnum, auto
@@ -29,40 +33,40 @@ class ODESystem(StrEnum):
     """Dynamical systems registry. Keys match SYSTEMS in serie.integrators."""
 
     # Continuous ODEs
-    LORENZ      = auto()   # 3D atmospheric convection, canonical chaos
-    ROSSLER     = auto()   # 3D single-scroll, simpler chaos than Lorenz
-    HYPER_ROSSLER = auto() # 4D hyperchaotic extension of Rössler
-    CHUA        = auto()   # 3D piecewise-linear double-scroll circuit
-    DUFFING     = auto()   # 2D driven nonlinear oscillator
-    VAN_DER_POL = auto()   # 2D self-sustained limit cycle
-    LORENZ96    = auto()   # N-D weather toy model (configurable dim)
+    LORENZ = auto()  # 3D atmospheric convection, canonical chaos
+    ROSSLER = auto()  # 3D single-scroll, simpler chaos than Lorenz
+    HYPER_ROSSLER = auto()  # 4D hyperchaotic extension of Rössler
+    CHUA = auto()  # 3D piecewise-linear double-scroll circuit
+    DUFFING = auto()  # 2D driven nonlinear oscillator
+    VAN_DER_POL = auto()  # 2D self-sustained limit cycle
+    LORENZ96 = auto()  # N-D weather toy model (configurable dim)
 
     # Discrete maps
-    HENON       = auto()   # 2D quadratic map, strange attractor
-    LOGISTIC    = auto()   # 1D map, period-doubling → chaos
+    HENON = auto()  # 2D quadratic map, strange attractor
+    LOGISTIC = auto()  # 1D map, period-doubling → chaos
 
     # SDEs (stochastic differential equations)
-    OU          = auto()   # 1D Ornstein-Uhlenbeck, mean-reverting
-    DOUBLEWELL  = auto()   # 1D bistable potential + Brownian noise
+    OU = auto()  # 1D Ornstein-Uhlenbeck, mean-reverting
+    DOUBLEWELL = auto()  # 1D bistable potential + Brownian noise
 
     # Discrete statistical processes
-    SLDS        = auto()   # 1D switching linear dynamical system
-    SEASONAL_AR = auto()   # 1D seasonal autoregressive
-    GARCH       = auto()   # 2D (return + variance) volatility model
+    SLDS = auto()  # 1D switching linear dynamical system
+    SEASONAL_AR = auto()  # 1D seasonal autoregressive
+    GARCH = auto()  # 2D (return + variance) volatility model
 
     # PDEs
-    KS          = auto()   # Kuramoto-Sivashinsky, spatiotemporal chaos
+    KS = auto()  # Kuramoto-Sivashinsky, spatiotemporal chaos
 
     # Designed (ground-truth eigenvalue recovery) — integrators TBD
-    LINEAR      = auto()   # dx/dt = Ax, prescribed real eigenvalues
-    DIAGONAL    = auto()   # dx/dt = diag(λ)x, trivial eigenvalue test
+    LINEAR = auto()  # dx/dt = Ax, prescribed real eigenvalues
+    DIAGONAL = auto()  # dx/dt = diag(λ)x, trivial eigenvalue test
     JORDAN_BLOCK = auto()  # dx/dt = Jx, off-diagonal sensitivity
-    ROTATION_2D = auto()   # dx/dt = [[0,-ω],[ω,0]]x, pure oscillation
+    ROTATION_2D = auto()  # dx/dt = [[0,-ω],[ω,0]]x, pure oscillation
 
     # Future / referenced in tier 4 catalog
-    THOMAS      = auto()   # 3D cyclic symmetric attractor
-    CHEN        = auto()   # 3D Lorenz-family, different topology
-    LOTKA_VOLTERRA = auto() # 2D predator-prey, conservative oscillation
+    THOMAS = auto()  # 3D cyclic symmetric attractor
+    CHEN = auto()  # 3D Lorenz-family, different topology
+    LOTKA_VOLTERRA = auto()  # 2D predator-prey, conservative oscillation
 
     @property
     def is_stochastic(self) -> bool:
@@ -111,19 +115,23 @@ def _f_lorenz(state: np.ndarray, t: float, sigma: float, rho: float, beta: float
     return np.array([sigma * (y - x), x * (rho - z) - y, x * y - beta * z], dtype=np.float64)
 
 
-def lorenz_spec(*, sigma=10.0, rho=28.0, beta=8.0/3.0,
-                steps=35999, dt=1e-2, burn_in=0):
+def lorenz_spec(*, sigma=10.0, rho=28.0, beta=8.0 / 3.0, steps=35999, dt=1e-2, burn_in=0):
     from .specs import TrajectorySpec
+
     return TrajectorySpec(
         system=ODESystem.LORENZ,
         params=LorenzParams(sigma=sigma, rho=rho, beta=beta),
-        dt=dt, steps=steps, burn_in=burn_in, dim=3,
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=3,
         x0=(1.0, 0.98, 1.1),
     )
 
 
 def lorenz_param_shock_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         lorenz_spec(),
         shocks=ShockSchedule.single(
@@ -137,6 +145,7 @@ def lorenz_param_shock_spec():
 
 def lorenz_state_shock_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         lorenz_spec(),
         shocks=ShockSchedule.single(
@@ -147,6 +156,7 @@ def lorenz_state_shock_spec():
 
 def lorenz_switch_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         lorenz_spec(),
         shocks=ShockSchedule.single(
@@ -188,19 +198,23 @@ def _f_rossler(state: np.ndarray, t: float, a: float, b: float, c: float) -> np.
     return np.array([-y - z, x + a * y, b + z * (x - c)], dtype=np.float64)
 
 
-def rossler_spec(*, a=0.2, b=0.2, c=5.7,
-                 steps=35999, dt=1e-2, burn_in=0):
+def rossler_spec(*, a=0.2, b=0.2, c=5.7, steps=35999, dt=1e-2, burn_in=0):
     from .specs import TrajectorySpec
+
     return TrajectorySpec(
         system=ODESystem.ROSSLER,
         params=RosslerParams(a=a, b=b, c=c),
-        dt=dt, steps=steps, burn_in=burn_in, dim=3,
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=3,
         x0=(1.0, 1.0, 1.0),
     )
 
 
 def rossler_param_shock_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         rossler_spec(),
         shocks=ShockSchedule.single(
@@ -238,9 +252,29 @@ class HyperRosslerParams:
     d: float  # Growth term for w
 
 
-def _f_hyper_rossler(state: np.ndarray, t: float, a: float, b: float, c: float, d: float) -> np.ndarray:
+def _f_hyper_rossler(
+    state: np.ndarray, t: float, a: float, b: float, c: float, d: float
+) -> np.ndarray:
     x, y, z, w = state
     return np.array([-y - z, x + a * y + w, b + x * z, -c * z + d * w], dtype=np.float64)
+
+
+def hyper_rossler_spec(*, a=0.25, b=3.0, c=0.5, d=0.05, steps=15000, dt=1e-3, burn_in=0):
+    # NOTE: the standard Hyper-Rössler is a transient attractor that escapes
+    # to infinity around T≈19s. steps=15000 at dt=0.001 gives T=15s, which
+    # is comfortably within the bounded regime with a 4s safety margin.
+    # The system IS hyperchaotic (two positive Lyapunov exponents).
+    from .specs import TrajectorySpec
+
+    return TrajectorySpec(
+        system=ODESystem.HYPER_ROSSLER,
+        params=HyperRosslerParams(a=a, b=b, c=c, d=d),
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=4,
+        x0=(0.1, 0.1, 0.1, 0.1),
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -258,10 +292,11 @@ class ChuaParams:
 
     Standard double-scroll: α=15.6, β=28, m1_inner_le1=-8/7 (inner), m0_outer_gt1=-5/7 (outer)
     """
+
     alpha: float
     beta: float
-    m1_inner_le1: float   # slope for (|x| ≤ 1)
-    m0_outer_gt1: float   # slope for (|x| > 1)
+    m1_inner_le1: float  # slope for (|x| ≤ 1)
+    m0_outer_gt1: float  # slope for (|x| > 1)
 
 
 def _f_chua(
@@ -300,26 +335,40 @@ def _f_chua(
     """
     x, y, z = state
     # h(x) formulation where m1_inner is slope at 0
-    hx = m0_outer_gt1 * x + 0.5 * (m1_inner_when_x_le1 - m0_outer_gt1) * (np.abs(x + 1) - np.abs(x - 1))
+    hx = m0_outer_gt1 * x + 0.5 * (m1_inner_when_x_le1 - m0_outer_gt1) * (
+        np.abs(x + 1) - np.abs(x - 1)
+    )
     return np.array([alpha * (y - x - hx), x - y + z, -beta * y], dtype=np.float64)
 
 
-def chua_spec(*, alpha=15.6, beta=28.0,
-              m1_inner_le1=-8/7, m0_outer_gt1=-5/7,
-              steps=35999, dt=5e-3, burn_in=0):
+def chua_spec(
+    *,
+    alpha=15.6,
+    beta=28.0,
+    m1_inner_le1=-8 / 7,
+    m0_outer_gt1=-5 / 7,
+    steps=35999,
+    dt=5e-3,
+    burn_in=0,
+):
     from .specs import TrajectorySpec
+
     return TrajectorySpec(
         system=ODESystem.CHUA,
-        params=ChuaParams(alpha=alpha, beta=beta,
-                          m1_inner_le1=m1_inner_le1,
-                          m0_outer_gt1=m0_outer_gt1),
-        dt=dt, steps=steps, burn_in=burn_in, dim=3,
+        params=ChuaParams(
+            alpha=alpha, beta=beta, m1_inner_le1=m1_inner_le1, m0_outer_gt1=m0_outer_gt1
+        ),
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=3,
         x0=(0.1, 0.0, 0.0),
     )
 
 
 def chua_param_shock_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         chua_spec(),
         shocks=ShockSchedule.single(
@@ -338,6 +387,7 @@ def chua_param_shock_spec():
 
 def chua_switch_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         chua_spec(),
         shocks=ShockSchedule.single(
@@ -388,6 +438,28 @@ def _f_duffing(
     )
 
 
+def duffing_spec(
+    *, alpha=1.0, beta=1.0, delta=0.3, gamma=0.3, omega=1.0, steps=35999, dt=1e-2, burn_in=0
+):
+    # NOTE: beta=1 (hardening spring) is bounded and stable at any T.
+    # beta=-1 (softening spring, the classic chaotic Duffing) diverges
+    # around step ~3000 at dt=0.002. Use beta=-1 only with short steps
+    # and small dt. The hardening preset is a quasiperiodic forced
+    # oscillator — useful for testing forecasters on periodic-ish signals.
+    from .specs import TrajectorySpec
+
+    return TrajectorySpec(
+        system=ODESystem.DUFFING,
+        params=DuffingParams(alpha=alpha, beta=beta, delta=delta, gamma=gamma, omega=omega),
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=2,
+        x0=(0.5, 0.0),
+        method="rk4",
+    )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Van der Pol
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -412,6 +484,20 @@ class VanderPolParams:
 def _f_vanderpol(state: np.ndarray, t: float, mu: float) -> np.ndarray:
     x, y = state
     return np.array([y, mu * (1.0 - x**2) * y - x], dtype=np.float64)
+
+
+def vanderpol_spec(*, mu=2.0, steps=35999, dt=1e-2, burn_in=1000):
+    from .specs import TrajectorySpec
+
+    return TrajectorySpec(
+        system=ODESystem.VAN_DER_POL,
+        params=VanderPolParams(mu=mu),
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=2,
+        x0=(1.0, 0.0),
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -441,20 +527,24 @@ def _f_lorenz96(state: np.ndarray, t: float, forcing: float) -> np.ndarray:
     return (np.roll(state, -1) - np.roll(state, 2)) * np.roll(state, 1) - state + forcing
 
 
-def lorenz96_spec(*, dim=6, forcing=8.0,
-                  steps=55000, dt=7e-3, burn_in=0):
+def lorenz96_spec(*, dim=6, forcing=8.0, steps=55000, dt=7e-3, burn_in=0):
     from .specs import TrajectorySpec
+
     x0 = tuple([1.01] + [1.0] * (dim - 1))
     return TrajectorySpec(
         system=ODESystem.LORENZ96,
         params=Lorenz96Params(forcing=forcing),
-        dt=dt, steps=steps, burn_in=burn_in, dim=dim,
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=dim,
         x0=x0,
     )
 
 
 def lorenz96_switch_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         lorenz96_spec(),
         shocks=ShockSchedule.single(
@@ -496,6 +586,21 @@ def _f_henon(state: np.ndarray, a: float, b: float) -> np.ndarray:
     return np.array([1 - a * x2 + y, b * x], dtype=np.float64)
 
 
+def henon_spec(*, a=1.4, b=0.3, steps=35999, burn_in=500):
+    from .specs import TrajectorySpec
+
+    return TrajectorySpec(
+        system=ODESystem.HENON,
+        params=HenonParams(a=a, b=b),
+        dt=1.0,
+        steps=steps,
+        burn_in=burn_in,
+        dim=2,
+        method="map",
+        x0=(0.1, 0.1),
+    )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Logistic
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -520,6 +625,21 @@ class LogisticParams:
 def _f_logistic(state: np.ndarray, r: float) -> np.ndarray:
     x = state[0]
     return np.array([r * x * (1 - x)], dtype=np.float64)
+
+
+def logistic_spec(*, r=3.9, steps=35999, burn_in=500):
+    from .specs import TrajectorySpec
+
+    return TrajectorySpec(
+        system=ODESystem.LOGISTIC,
+        params=LogisticParams(r=r),
+        dt=1.0,
+        steps=steps,
+        burn_in=burn_in,
+        dim=1,
+        method="map",
+        x0=(0.5,),
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -547,24 +667,30 @@ class OUParams:
     sigma_noise: float  # Volatility (diffusion coefficient)
 
 
-def _f_ou_drift(state: np.ndarray, t: float, theta: float, mu: float, sigma_noise: float) -> np.ndarray:
+def _f_ou_drift(
+    state: np.ndarray, t: float, theta: float, mu: float, sigma_noise: float
+) -> np.ndarray:
     return np.array([theta * (mu - state[0])], dtype=np.float64)
 
 
-def ou_spec(*, theta=0.2, mu=0.0, sigma_noise=0.3,
-            steps=25000, dt=0.5, burn_in=0):
+def ou_spec(*, theta=0.2, mu=0.0, sigma_noise=0.3, steps=25000, dt=0.5, burn_in=0):
     from .specs import TrajectorySpec
+
     return TrajectorySpec(
         system=ODESystem.OU,
         params=OUParams(theta=theta, mu=mu, sigma_noise=sigma_noise),
-        dt=dt, steps=steps, burn_in=burn_in, dim=1,
-        method="euler",                        # ← NEW
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=1,
+        method="euler",  # ← NEW
         x0=(0.0,),
     )
 
 
 def ou_param_shock_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         ou_spec(),
         shocks=ShockSchedule.single(
@@ -605,20 +731,24 @@ def _f_doublewell_drift(state: np.ndarray, t: float, a: float, sigma_noise: floa
     return np.array([-(x**3) + a * x], dtype=np.float64)
 
 
-def doublewell_spec(*, a=1.5, sigma_noise=0.25,
-                    steps=25000, dt=0.5, burn_in=0):
+def doublewell_spec(*, a=1.5, sigma_noise=0.25, steps=25000, dt=0.5, burn_in=0):
     from .specs import TrajectorySpec
+
     return TrajectorySpec(
         system=ODESystem.DOUBLEWELL,
         params=DoubleWellParams(a=a, sigma_noise=sigma_noise),
-        dt=dt, steps=steps, burn_in=burn_in, dim=1,
-        method="euler",                        # ← NEW
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=1,
+        method="euler",  # ← NEW
         x0=(0.0,),
     )
 
 
 def doublewell_param_shock_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         doublewell_spec(),
         shocks=ShockSchedule.single(
@@ -632,6 +762,7 @@ def doublewell_param_shock_spec():
 
 def doublewell_switch_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         doublewell_spec(),
         shocks=ShockSchedule.single(
@@ -671,20 +802,24 @@ class SLDSParams:
     p22: float  # P(stay in regime 2)
 
 
-def slds_spec(*, A1=0.9, Q1=0.05, A2=0.98, Q2=0.35, p11=0.94, p22=0.95,
-              steps=25000):
+def slds_spec(*, A1=0.9, Q1=0.05, A2=0.98, Q2=0.35, p11=0.94, p22=0.95, steps=25000):
     from .specs import TrajectorySpec
+
     return TrajectorySpec(
         system=ODESystem.SLDS,
         params=SLDSParams(A1=A1, Q1=Q1, A2=A2, Q2=Q2, p11=p11, p22=p22),
-        dt=1.0, steps=steps, burn_in=0, dim=1,
-        method="euler",                        # ← NEW (ignored for discrete; schema compat)
+        dt=1.0,
+        steps=steps,
+        burn_in=0,
+        dim=1,
+        method="euler",  # ← NEW (ignored for discrete; schema compat)
         x0=(0.0,),
-    ) #NOTE Note: dt=1.0 is a dummy
+    )  # NOTE Note: dt=1.0 is a dummy
 
 
 def slds_param_shock_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         slds_spec(),
         shocks=ShockSchedule.single(
@@ -705,6 +840,7 @@ def slds_param_shock_spec():
 
 def slds_switch_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         slds_spec(),
         shocks=ShockSchedule.single(
@@ -746,13 +882,16 @@ class SeasonalARParams:
     amp_drift: float  # Amplitude drift per step
 
 
-def seasonal_ar_spec(*, S=24, phi=0.5, sigma=0.2, a0=1.0, amp_drift=0e-4,
-                     steps=25000):
+def seasonal_ar_spec(*, S=24, phi=0.5, sigma=0.2, a0=1.0, amp_drift=0e-4, steps=25000):
     from .specs import TrajectorySpec
+
     return TrajectorySpec(
         system=ODESystem.SEASONAL_AR,
         params=SeasonalARParams(S=S, phi=phi, sigma=sigma, a0=a0, amp_drift=amp_drift),
-        dt=1.0, steps=steps, burn_in=0, dim=1,
+        dt=1.0,
+        steps=steps,
+        burn_in=0,
+        dim=1,
         method="euler",
         x0=(0.0,),
     )
@@ -760,6 +899,7 @@ def seasonal_ar_spec(*, S=24, phi=0.5, sigma=0.2, a0=1.0, amp_drift=0e-4,
 
 def seasonal_ar_param_shock_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         seasonal_ar_spec(),
         shocks=ShockSchedule.single(
@@ -799,9 +939,9 @@ class GARCHParams:
     beta: float  # GARCH coefficient (persistence)
 
 
-def garch_spec(*, omega=0.01, alpha=0.06, beta=0.90,
-               steps=25000):
+def garch_spec(*, omega=0.01, alpha=0.06, beta=0.90, steps=25000):
     from .specs import TrajectorySpec
+
     if (alpha + beta) < 1.0:
         sigma2_0 = omega / max(1e-9, 1.0 - alpha - beta)
     else:
@@ -809,7 +949,10 @@ def garch_spec(*, omega=0.01, alpha=0.06, beta=0.90,
     return TrajectorySpec(
         system=ODESystem.GARCH,
         params=GARCHParams(omega=omega, alpha=alpha, beta=beta),
-        dt=1.0, steps=steps, burn_in=0, dim=2,
+        dt=1.0,
+        steps=steps,
+        burn_in=0,
+        dim=2,
         method="euler",
         x0=(0.0, sigma2_0),
     )
@@ -817,6 +960,7 @@ def garch_spec(*, omega=0.01, alpha=0.06, beta=0.90,
 
 def garch_param_shock_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         garch_spec(),
         shocks=ShockSchedule.single(
@@ -856,13 +1000,16 @@ class KSParams:
     dealias: bool = True  # Whether to apply 2/3-rule dealiasing
 
 
-def ks_spec(*, nx=64, Lx=22.0, nu=1.0,
-            steps=25000, dt=1e-2, burn_in=0):
+def ks_spec(*, nx=64, Lx=22.0, nu=1.0, steps=25000, dt=1e-2, burn_in=0):
     from .specs import TrajectorySpec
+
     return TrajectorySpec(
         system=ODESystem.KS,
         params=KSParams(nu=nu, Lx=Lx, nx=nx, dealias=True),
-        dt=dt, steps=steps, burn_in=burn_in, dim=nx,
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=nx,
         method="etdrk4",
         x0=tuple([0.0] * nx),
     )
@@ -870,6 +1017,7 @@ def ks_spec(*, nx=64, Lx=22.0, nu=1.0,
 
 def ks_param_shock_spec():
     from .specs import ShockSchedule, ShockEvent
+
     return evolve(
         ks_spec(),
         shocks=ShockSchedule.single(
@@ -890,6 +1038,7 @@ def ks_param_shock_spec():
 class DiagonalParams:
     """dx/dt = diag(eigenvalues) · x — trivial eigenvalue recovery test.
     Ground truth: learned discrete eigenvalues should be exp(λ_i · dt)."""
+
     eigenvalues: tuple[float, ...] = (-0.5, -1.0, -2.0)
 
 
@@ -900,7 +1049,9 @@ def _f_diagonal(state: np.ndarray, t: float, eigenvalues: tuple[float, ...]) -> 
 def diagonal_spec(
     *,
     eigenvalues: tuple[float, ...] = (-0.5, -1.0, -2.0),
-    steps: int = 10000, dt: float = 0.01, burn_in: int = 0,
+    steps: int = 10000,
+    dt: float = 0.01,
+    burn_in: int = 0,
 ):
     """dx/dt = diag(λ)x — trivial eigenvalue test.
     Ground truth: discrete propagator eigenvalues = exp(λ_i · dt).
@@ -908,10 +1059,13 @@ def diagonal_spec(
     NOTE: Output shape is (steps - burn_in + 1, dim), not (steps, dim).
     """
     from .specs import TrajectorySpec
+
     return TrajectorySpec(
         system=ODESystem.DIAGONAL,
         params=DiagonalParams(eigenvalues=eigenvalues),
-        dt=dt, steps=steps, burn_in=burn_in,
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
         dim=len(eigenvalues),
         x0=tuple([1.0] * len(eigenvalues)),
     )
@@ -922,12 +1076,22 @@ def diagonal_spec(
 # ═══════════════════════════════════════════════════════════════════════════
 
 SystemParams = (
-    LorenzParams | RosslerParams | HyperRosslerParams | ChuaParams
-    | DuffingParams | VanderPolParams | Lorenz96Params
-    | HenonParams | LogisticParams
-    | OUParams | DoubleWellParams
-    | SLDSParams | SeasonalARParams | GARCHParams
-    | KSParams | DiagonalParams
+    LorenzParams
+    | RosslerParams
+    | HyperRosslerParams
+    | ChuaParams
+    | DuffingParams
+    | VanderPolParams
+    | Lorenz96Params
+    | HenonParams
+    | LogisticParams
+    | OUParams
+    | DoubleWellParams
+    | SLDSParams
+    | SeasonalARParams
+    | GARCHParams
+    | KSParams
+    | DiagonalParams
 )
 
 
@@ -939,6 +1103,7 @@ SystemParams = (
 @attr.define(frozen=True)
 class SystemSpec:
     """Specification for a dynamical system (structure only, no defaults)."""
+
     name: str
     dim: int  # -1 for variable dimension
     param_type: type[AttrsInstance]  # AttrsInstance type for params
@@ -949,52 +1114,100 @@ class SystemSpec:
 
 SYSTEMS: dict[str, SystemSpec] = {
     "lorenz": SystemSpec(
-        name="lorenz", dim=3, param_type=LorenzParams,
-        kind="ode", time_dependent=False, f_py=_f_lorenz,
+        name="lorenz",
+        dim=3,
+        param_type=LorenzParams,
+        kind="ode",
+        time_dependent=False,
+        f_py=_f_lorenz,
     ),
     "rossler": SystemSpec(
-        name="rossler", dim=3, param_type=RosslerParams,
-        kind="ode", time_dependent=False, f_py=_f_rossler,
+        name="rossler",
+        dim=3,
+        param_type=RosslerParams,
+        kind="ode",
+        time_dependent=False,
+        f_py=_f_rossler,
     ),
     "hyper_rossler": SystemSpec(
-        name="hyper_rossler", dim=4, param_type=HyperRosslerParams,
-        kind="ode", time_dependent=False, f_py=_f_hyper_rossler,
+        name="hyper_rossler",
+        dim=4,
+        param_type=HyperRosslerParams,
+        kind="ode",
+        time_dependent=False,
+        f_py=_f_hyper_rossler,
     ),
     "chua": SystemSpec(
-        name="chua", dim=3, param_type=ChuaParams,
-        kind="ode", time_dependent=False, f_py=_f_chua,
+        name="chua",
+        dim=3,
+        param_type=ChuaParams,
+        kind="ode",
+        time_dependent=False,
+        f_py=_f_chua,
     ),
     "duffing": SystemSpec(
-        name="duffing", dim=2, param_type=DuffingParams,
-        kind="ode", time_dependent=True, f_py=_f_duffing,
+        name="duffing",
+        dim=2,
+        param_type=DuffingParams,
+        kind="ode",
+        time_dependent=True,
+        f_py=_f_duffing,
     ),
     "vanderpol": SystemSpec(
-        name="van_der_pol", dim=2, param_type=VanderPolParams,
-        kind="ode", time_dependent=False, f_py=_f_vanderpol,
+        name="van_der_pol",
+        dim=2,
+        param_type=VanderPolParams,
+        kind="ode",
+        time_dependent=False,
+        f_py=_f_vanderpol,
     ),
     "lorenz96": SystemSpec(
-        name="lorenz96", dim=-1, param_type=Lorenz96Params,
-        kind="ode", time_dependent=False, f_py=_f_lorenz96,
+        name="lorenz96",
+        dim=-1,
+        param_type=Lorenz96Params,
+        kind="ode",
+        time_dependent=False,
+        f_py=_f_lorenz96,
     ),
     "henon": SystemSpec(
-        name="henon", dim=2, param_type=HenonParams,
-        kind="map", time_dependent=False, f_py=_f_henon,
+        name="henon",
+        dim=2,
+        param_type=HenonParams,
+        kind="map",
+        time_dependent=False,
+        f_py=_f_henon,
     ),
     "logistic": SystemSpec(
-        name="logistic", dim=1, param_type=LogisticParams,
-        kind="map", time_dependent=False, f_py=_f_logistic,
+        name="logistic",
+        dim=1,
+        param_type=LogisticParams,
+        kind="map",
+        time_dependent=False,
+        f_py=_f_logistic,
     ),
     "ou": SystemSpec(
-        name="ou", dim=1, param_type=OUParams,
-        kind="sde", time_dependent=False, f_py=_f_ou_drift,
+        name="ou",
+        dim=1,
+        param_type=OUParams,
+        kind="sde",
+        time_dependent=False,
+        f_py=_f_ou_drift,
     ),
     "doublewell": SystemSpec(
-        name="doublewell", dim=1, param_type=DoubleWellParams,
-        kind="sde", time_dependent=False, f_py=_f_doublewell_drift,
+        name="doublewell",
+        dim=1,
+        param_type=DoubleWellParams,
+        kind="sde",
+        time_dependent=False,
+        f_py=_f_doublewell_drift,
     ),
     "diagonal": SystemSpec(
-        name="diagonal", dim=-1, param_type=DiagonalParams,
-        kind="ode", time_dependent=False, f_py=_f_diagonal,
+        name="diagonal",
+        dim=-1,
+        param_type=DiagonalParams,
+        kind="ode",
+        time_dependent=False,
+        f_py=_f_diagonal,
     ),
 }
 
@@ -1006,8 +1219,13 @@ _ALL_PRESETS = {
     "lorenz": lorenz_spec,
     "lorenz_param_shock": lorenz_param_shock_spec,
     "rossler": rossler_spec,
+    "hyper_rossler": hyper_rossler_spec,
     "chua": chua_spec,
+    "duffing": duffing_spec,
+    "vanderpol": vanderpol_spec,
     "lorenz96": lorenz96_spec,
+    "henon": henon_spec,
+    "logistic": logistic_spec,
     "ou": ou_spec,
     "doublewell": doublewell_spec,
     "slds": slds_spec,

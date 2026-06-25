@@ -1,3 +1,17 @@
+"""Known-data boundary tests — verify error messages when datasets are missing.
+
+The SERIE wheel does not bundle large known datasets (ETT, HuGaDB).  These
+tests verify that when a user tries to load a known dataset that isn't staged
+locally, the error message:
+
+    1. says the dataset is not bundled with the wheel,
+    2. tells them to set SERIE_KNOWN_ROOT or use KnownMeta.custom(path=...),
+    3. includes the upstream source URL so they can find the data.
+
+These tests use monkeypatch to point SERIE_KNOWN_ROOT at an empty temp
+directory, so they never need real dataset files.
+"""
+
 from __future__ import annotations
 
 import pytest

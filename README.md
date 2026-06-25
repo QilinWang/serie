@@ -98,7 +98,7 @@ domain specialist, or a model trained to know that domain's failure modes:
   regenerate and re-check months later.
 
 - **Bring your own system — it is not synthetic-only.** SERIE is not limited to
-  simulated data. Hand it a clean recording — a gait trace, a robot's sensors,
+  simulated data. Hand it a clean recording — a wearable gait trace, sensor logs,
   your own production series as a `[T, D]` array — and it stress-tests that the
   same way: perturb it with controlled noise, split it, certify against it. The lab
   comes to your domain, not the other way around.
@@ -186,7 +186,7 @@ All of this works on a real recording too — hand `build_empirical_dgp_bank` a 
 ```python
 from serie import build_empirical_dgp_bank, inject_noise
 
-bank = build_empirical_dgp_bank(my_array, name="robot_gait")
+bank = build_empirical_dgp_bank(my_array, name="wearable_gait")
 split = inject_noise(bank, sigma=1.0, sigma_scale="train_std")
 ```
 
@@ -223,13 +223,6 @@ After installing from PyPI, use the shorter installed command:
 
 ```bash
 serie walkthrough --out tmp/walkthrough --overwrite --format json
-```
-
-For a plain Python example instead of the CLI, read and run the single source
-example at `serie/example.py`:
-
-```bash
-python serie/example.py
 ```
 
 Runtime dependencies are `attrs`, `cappa`, `matplotlib`, `numpy`, and `polars`.
@@ -312,8 +305,8 @@ serie list --format json
 serie data-dir --format json
 serie inspect ou --format json
 serie generate ou --sigma 0.1 --partition p70_20_10 --format json
-serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz_cell --array-format both --plot both --overwrite --format json
-serie walkthrough --out tmp/walkthrough --array-format both --overwrite --format json
+serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz_cell --array-format all --plot both --overwrite --format json
+serie walkthrough --out tmp/walkthrough --array-format all --overwrite --format json
 serie demo lorenz --out tmp/lorenz_demo.html --overwrite
 ```
 
@@ -348,7 +341,7 @@ Add `--format json` to any command for machine-readable output. Use
 ```bash
 serie generate lorenz --sigma 0.1 --format json
 serie generate lorenz --shock param --sigma 0.1 --format json
-serie generate lorenz --sigma 0.1 --out tmp/cell --array-format both --plot both --overwrite --format json
+serie generate lorenz --sigma 0.1 --out tmp/cell --array-format all --plot both --overwrite --format json
 ```
 
 Key options: `--shock none|param|state|switch` for built-in interventions,
@@ -356,12 +349,22 @@ Key options: `--shock none|param|state|switch` for built-in interventions,
 `--partition` for split convention, `--out` for artifact directory,
 `--array-format` and `--plot` for file outputs.
 
-**`demo`** writes a single HTML file — open it in a browser, drag the 3D
-attractor, slide the noise. Supported sources: `lorenz`, `rossler`, `chua`.
+**`demo`** writes a single self-contained HTML file — open it in a browser,
+drag the 3D trajectory, and slide the observation-noise dose. Supported demo
+sources: `lorenz`, `rossler`, `chua`, `vanderpol`, `henon`, `logistic`.
 
 ```bash
 serie demo lorenz --out tmp/lorenz_demo.html
+serie demo henon --out tmp/henon_demo.html --data-out tmp/henon_demo.json
 ```
+
+`--data-out` writes the browser payload as JSON. That JSON is the viewer
+contract only: it stores `clean` points, frozen noise `draws`, feature names,
+projection metadata, and seed/source metadata so a hosted or local demo page can
+load it with the **Load local JSON** button. SERIE's data interchange artifacts
+remain `npy`/CSV/IPC/Parquet exports from `serie generate`/`serie export`; Fern-side
+high-throughput handoff can keep using IPC. JSON is for browser visualization
+and metadata, not the preferred bulk array format.
 
 **`walkthrough`** is the full package verification — it writes arrays, CSVs,
 manifests, and figures for both a regular and parameter-shifted Lorenz source.
@@ -374,6 +377,12 @@ serie walkthrough --out tmp/walkthrough --overwrite --format json
 
 The CLI is the easiest place to start, but the Python API is the programmable
 surface for notebooks, experiments, and trainer integrations.
+
+For a plain Python teaching walkthrough, read
+[`docs/python_walkthrough.md`](https://github.com/QilinWang/serie/blob/main/docs/python_walkthrough.md)
+This does not replace the visual `serie demo`; it explains the public primitive
+composition behind `serie generate`, several source families, intervention/noise
+as separate axes, stochastic draw pairing, and wrapping your own clean array.
 
 Most users need this import line:
 
@@ -410,7 +419,7 @@ For clean recorded data, wrap a `[T, D]` NumPy array directly:
 ```python
 from serie import build_empirical_dgp_bank, inject_noise
 
-bank = build_empirical_dgp_bank(values, name="robot_gait")
+bank = build_empirical_dgp_bank(values, name="wearable_gait")
 split = inject_noise(bank, sigma=1.0, sigma_scale="train_std")
 ```
 

@@ -102,7 +102,9 @@ def _shock_label_y(*, time: np.ndarray, values: np.ndarray, x: float) -> float:
     return 0.06 if local_mid >= global_mid else 0.94
 
 
-def _draw_shock_markers(ax, *, source: TrajectorySpec | None, time: np.ndarray, values: np.ndarray) -> None:
+def _draw_shock_markers(
+    ax, *, source: TrajectorySpec | None, time: np.ndarray, values: np.ndarray
+) -> None:
     events = _shock_events(source)
     if not events or time.size == 0:
         return
@@ -128,7 +130,12 @@ def _draw_shock_markers(ax, *, source: TrajectorySpec | None, time: np.ndarray, 
             va=va,
             fontsize=11,
             color="#8F2D64",
-            bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "edgecolor": "#CC79A7", "alpha": 0.9},
+            bbox={
+                "boxstyle": "round,pad=0.2",
+                "facecolor": "white",
+                "edgecolor": "#CC79A7",
+                "alpha": 0.9,
+            },
             zorder=5,
         )
 
@@ -252,9 +259,19 @@ def _plot_timeseries(
     )
 
     fig, ax = plt.subplots(figsize=(12, 6), layout="constrained")
-    ax.plot(time, clean, label="Clean Source", color=CLEAN_COLOR, linewidth=1.9, alpha=0.92, zorder=3)
+    ax.plot(
+        time, clean, label="Clean Source", color=CLEAN_COLOR, linewidth=1.9, alpha=0.92, zorder=3
+    )
     if sigma != 0.0:
-        ax.plot(time, noisy, label="Noisy Source", color=NOISY_COLOR, linewidth=1.15, alpha=0.42, zorder=2)
+        ax.plot(
+            time,
+            noisy,
+            label="Noisy Source",
+            color=NOISY_COLOR,
+            linewidth=1.15,
+            alpha=0.42,
+            zorder=2,
+        )
     _draw_reference_after_shock(
         ax,
         source=source,
@@ -267,7 +284,11 @@ def _plot_timeseries(
     _draw_shock_markers(ax, source=source, time=time, values=marker_values)
     ax.set_title(_title(bank=bank, sigma=sigma, source=source), weight="bold")
     ax.set_xlabel("Time")
-    ax.set_ylabel(bank.feature_names[feature_idx] if feature_idx < len(bank.feature_names) else f"Dim {feature_idx}")
+    ax.set_ylabel(
+        bank.feature_names[feature_idx]
+        if feature_idx < len(bank.feature_names)
+        else f"Dim {feature_idx}"
+    )
     ax.legend(loc="upper right", framealpha=0.95)
     ax.margins(x=0)
     ax.grid(True, linestyle=":", alpha=0.5)
@@ -347,7 +368,9 @@ def _attractor_xyz_and_labels(
     return np.stack(coords, axis=0), cast(tuple[str, str, str], tuple(labels))
 
 
-def _format_attractor_axis(ax, *, labels: tuple[str, str, str], limits: tuple[tuple[float, float], ...]) -> None:
+def _format_attractor_axis(
+    ax, *, labels: tuple[str, str, str], limits: tuple[tuple[float, float], ...]
+) -> None:
     ax.set_xlabel(labels[0], labelpad=8)
     ax.set_ylabel(labels[1], labelpad=8)
     ax.set_zlabel(labels[2], labelpad=8)
@@ -390,7 +413,11 @@ def _plot_attractor(
         raise ValueError(f"features_idx={features_idx} out of range for D={bank.D}")
 
     clean = bank.clean[trajectory_draw_ordinal]
-    noisy = bank.build_observed_series(noise_level=sigma, trajectory_draw_ordinal=trajectory_draw_ordinal, noise_draw_ordinal=noise_draw_ordinal)
+    noisy = bank.build_observed_series(
+        noise_level=sigma,
+        trajectory_draw_ordinal=trajectory_draw_ordinal,
+        noise_draw_ordinal=noise_draw_ordinal,
+    )
     clean = _downsample(clean, max_points=max_points)
     noisy = _downsample(noisy, max_points=max_points)
     clean_xyz, labels = _attractor_xyz_and_labels(
@@ -446,7 +473,9 @@ def _plot_attractor(
     return save_to
 
 
-def _resolve_plot_paths(out: str | Path, *, source_name: str, kind: PlotKind, plot_format: PlotFormat) -> dict[str, Path]:
+def _resolve_plot_paths(
+    out: str | Path, *, source_name: str, kind: PlotKind, plot_format: PlotFormat
+) -> dict[str, Path]:
     path = Path(out)
     suffix = path.suffix or f".{plot_format}"
     if kind != "both":

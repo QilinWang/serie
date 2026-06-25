@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -30,12 +30,12 @@ jobs:
           enable-cache: true
 
       - name: Install Python
-        run: uv python install 3.12
+        run: uv python install 3.14
 
       - name: Generate offline Lorenz demo
         run: |
           mkdir -p site
-          uv run --python 3.12 --no-project --with-editable ".[dev,diagnostics]" serie demo lorenz --out site/index.html --overwrite
+          uv run --python 3.14 --no-project --with-editable ".[dev,diagnostics]" serie demo lorenz --out site/index.html --overwrite
           touch site/.nojekyll
 
       - name: Configure Pages

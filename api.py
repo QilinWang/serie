@@ -11,6 +11,7 @@ Functions / 函数:
     build_noisy_bundle_for_cell(bank, ...) → DataBundle
     export_dgp_bank_files(bank, out_dir) → dict
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
@@ -68,7 +69,52 @@ def _feature_columns(array: np.ndarray, feature_names: tuple[str, ...]) -> dict[
     return {name: array[..., i].reshape(-1) for i, name in enumerate(feature_names)}
 
 
-def _write_rep_csv(
+def _rep_dataframe(
+    array: np.ndarray,
+    *,
+    rep_col: str,
+    feature_names: tuple[str, ...],
+) -> pl.DataFrame:
+    if array.ndim != 3:
+        raise ValueError(f"rep table export expects [N, T, D], got {array.shape}")
+    n_rep, T, _ = array.shape
+    cols: dict[str, np.ndarray] = {
+        rep_col: np.repeat(np.arange(n_rep, dtype=np.int64), T),
+        "t": np.tile(np.arange(T, dtype=np.int64), n_rep),
+    }
+    cols.update(_feature_columns(array, feature_names))
+    return pl.DataFrame(cols)
+
+
+def _cell_dataframe(
+    array: np.ndarray,
+    *,
+    feature_names: tuple[str, ...],
+) -> pl.DataFrame:
+    if array.ndim != 2:
+        raise ValueError(f"cell table export expects [T, D], got {array.shape}")
+    cols: dict[str, np.ndarray] = {"t": np.arange(array.shape[0], dtype=np.int64)}
+    cols.update(_feature_columns(array, feature_names))
+    return pl.DataFrame(cols)
+
+
+def _write_frame(path: Path, frame: pl.DataFrame, *, overwrite: bool) -> str:
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"{path} already exists; pass overwrite=True to replace it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        frame.write_csv(path)
+    elif suffix == ".ipc":
+        frame.write_ipc(path)
+    elif suffix == ".parquet":
+        frame.write_parquet(path)
+    else:
+        raise ValueError(f"unsupported table export suffix {suffix!r}")
+    return str(path)
+
+
+def _write_rep_table(
     path: Path,
     array: np.ndarray,
     *,
@@ -76,37 +122,25 @@ def _write_rep_csv(
     feature_names: tuple[str, ...],
     overwrite: bool,
 ) -> str:
-    if path.exists() and not overwrite:
-        raise FileExistsError(f"{path} already exists; pass overwrite=True to replace it")
-    if array.ndim != 3:
-        raise ValueError(f"rep CSV export expects [N, T, D], got {array.shape}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    n_rep, T, _ = array.shape
-    cols: dict[str, np.ndarray] = {
-        rep_col: np.repeat(np.arange(n_rep, dtype=np.int64), T),
-        "t": np.tile(np.arange(T, dtype=np.int64), n_rep),
-    }
-    cols.update(_feature_columns(array, feature_names))
-    pl.DataFrame(cols).write_csv(path)
-    return str(path)
+    return _write_frame(
+        path,
+        _rep_dataframe(array, rep_col=rep_col, feature_names=feature_names),
+        overwrite=overwrite,
+    )
 
 
-def _write_cell_csv(
+def _write_cell_table(
     path: Path,
     array: np.ndarray,
     *,
     feature_names: tuple[str, ...],
     overwrite: bool,
 ) -> str:
-    if path.exists() and not overwrite:
-        raise FileExistsError(f"{path} already exists; pass overwrite=True to replace it")
-    if array.ndim != 2:
-        raise ValueError(f"cell CSV export expects [T, D], got {array.shape}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cols: dict[str, np.ndarray] = {"t": np.arange(array.shape[0], dtype=np.int64)}
-    cols.update(_feature_columns(array, feature_names))
-    pl.DataFrame(cols).write_csv(path)
-    return str(path)
+    return _write_frame(
+        path,
+        _cell_dataframe(array, feature_names=feature_names),
+        overwrite=overwrite,
+    )
 
 
 def _write_json(path: Path, payload: dict[str, object], *, overwrite: bool) -> str:
@@ -117,8 +151,15 @@ def _write_json(path: Path, payload: dict[str, object], *, overwrite: bool) -> s
     return str(path)
 
 
-def _wants_format(array_format: ArrayFormat, candidate: Literal["npy", "csv"]) -> bool:
-    return array_format == "both" or array_format == candidate
+def _wants_format(
+    array_format: ArrayFormat,
+    candidate: Literal["npy", "csv", "ipc", "parquet"],
+) -> bool:
+    if array_format == "all":
+        return True
+    if array_format == "table":
+        return candidate in {"csv", "ipc", "parquet"}
+    return array_format == candidate
 
 
 def _plan_counts_for_export(
@@ -126,11 +167,7 @@ def _plan_counts_for_export(
     design: DrawDesign,
 ) -> tuple[int, int]:
     if design is DrawDesign.AUTO:
-        resolved = (
-            DrawDesign.JOINT
-            if bank.is_stochastic
-            else DrawDesign.NOISE_ONLY
-        )
+        resolved = DrawDesign.JOINT if bank.is_stochastic else DrawDesign.NOISE_ONLY
     else:
         resolved = design
     if resolved in {DrawDesign.NOISE_ONLY, DrawDesign.TRAJECTORY_FIXED}:
@@ -142,6 +179,7 @@ def _resolve_source(source) -> TrajectorySpec | KnownMeta | KnownDataID:
     """Convert a string system name to TrajectorySpec via catalog preset, or pass through."""
     if isinstance(source, str):
         from .catalog import list_sources, source_preset
+
         try:
             return source_preset(source)()
         except ValueError as exc:
@@ -172,16 +210,16 @@ def _resolve_source(source) -> TrajectorySpec | KnownMeta | KnownDataID:
 # multiplier and the draw distribution owns the physical scale.
 NoiseSampler = Callable[[np.random.Generator, tuple[int, ...]], np.ndarray]
 SigmaScale = Literal["unit", "train_std"]
-ArrayFormat = Literal["npy", "csv", "both"]
+ArrayFormat = Literal["npy", "csv", "ipc", "parquet", "table", "all"]
 
 _NOISE_KINDS: dict[str, NoiseSampler] = {
     # N(0, 1) — the default of both papers' main protocol.
     "gaussian": lambda rng, shape: rng.standard_normal(shape, dtype=np.float32),
     # Laplace(0, 1/sqrt(2)) has variance one, like the Gaussian path, so
     # noise_level remains a std-scale intervention for heavy-tailed checks.
-    "laplace": lambda rng, shape: rng.laplace(
-        loc=0.0, scale=1.0 / np.sqrt(2.0), size=shape
-    ).astype(np.float32),
+    "laplace": lambda rng, shape: rng.laplace(loc=0.0, scale=1.0 / np.sqrt(2.0), size=shape).astype(
+        np.float32
+    ),
 }
 
 
@@ -217,10 +255,7 @@ def _draw_noise_draws(
     """Draw one independent noise realization per spawned child seed."""
     T, D = shape
     return np.stack(
-        [
-            _draw_noise(np.random.default_rng(seed), (T, D), noise_kind)
-            for seed in noise_draw_seeds
-        ]
+        [_draw_noise(np.random.default_rng(seed), (T, D), noise_kind) for seed in noise_draw_seeds]
     ).astype(np.float32, copy=False)
 
 
@@ -305,9 +340,7 @@ def build_dgp_bank(
     else:
         raise TypeError(f"Unsupported source type after coercion: {type(source)!r}")
 
-    clean = np.stack(
-        [np.ascontiguousarray(ds.values, dtype=np.float32) for ds in series]
-    )
+    clean = np.stack([np.ascontiguousarray(ds.values, dtype=np.float32) for ds in series])
     _, T, D = clean.shape
     noise_draw_seeds = spawn_draw_seeds(noise_seed_base, n_noise_draws)
     noise_draws = _draw_noise_draws(
@@ -369,7 +402,7 @@ def build_empirical_dgp_bank(
         包含一个轨迹抽取和冻结噪声抽取的 DGPBank。
 
     Example / 示例:
-        >>> bank = build_empirical_dgp_bank(my_array, name="robot_gait")
+        >>> bank = build_empirical_dgp_bank(my_array, name="wearable_gait")
         >>> split = inject_noise(bank, sigma=0.5, sigma_scale="train_std")
     """
     data = np.asarray(values, dtype=np.float32)
@@ -412,7 +445,7 @@ def export_dgp_bank_files(
     out_dir: str | Path,
     *,
     sigmas: tuple[float, ...] = (),
-    array_format: ArrayFormat = "both",
+    array_format: ArrayFormat = "all",
     draw_design: DrawDesign | str = DrawDesign.AUTO,
     overwrite: bool = False,
 ) -> dict[str, object]:
@@ -423,13 +456,13 @@ def export_dgp_bank_files(
     inspection, cross-tool checks, or reproducibility review.
 
     Files:
-    - `clean.npy` / `clean.csv`: clean trajectories
-    - `noise_draws.npy` / `noise_draws.csv`: frozen noise draws
+    - `clean.npy` / `clean.csv` / `clean.ipc` / `clean.parquet`: clean trajectories
+    - `noise_draws.npy` / `noise_draws.csv` / `noise_draws.ipc` / `noise_draws.parquet`: frozen noise draws
     - `noisy/*`: optional cells selected by `draw_design`
     - `manifest.json`: provenance and relative file names
     """
-    if array_format not in {"npy", "csv", "both"}:
-        raise ValueError("array_format must be 'npy', 'csv', or 'both'")
+    if array_format not in {"npy", "csv", "ipc", "parquet", "table", "all"}:
+        raise ValueError("array_format must be 'npy', 'csv', 'ipc', 'parquet', 'table', or 'all'")
     design = DrawDesign(draw_design)
 
     out = Path(out_dir)
@@ -446,7 +479,7 @@ def export_dgp_bank_files(
         ).name
     if _wants_format(array_format, "csv"):
         files["clean_csv"] = Path(
-            _write_rep_csv(
+            _write_rep_table(
                 out / "clean.csv",
                 bank.clean,
                 rep_col="trajectory_draw_ordinal",
@@ -455,8 +488,46 @@ def export_dgp_bank_files(
             )
         ).name
         files["noise_draws_csv"] = Path(
-            _write_rep_csv(
+            _write_rep_table(
                 out / "noise_draws.csv",
+                bank.noise_draws,
+                rep_col="noise_draw_ordinal",
+                feature_names=bank.feature_names,
+                overwrite=overwrite,
+            )
+        ).name
+    if _wants_format(array_format, "ipc"):
+        files["clean_ipc"] = Path(
+            _write_rep_table(
+                out / "clean.ipc",
+                bank.clean,
+                rep_col="trajectory_draw_ordinal",
+                feature_names=bank.feature_names,
+                overwrite=overwrite,
+            )
+        ).name
+        files["noise_draws_ipc"] = Path(
+            _write_rep_table(
+                out / "noise_draws.ipc",
+                bank.noise_draws,
+                rep_col="noise_draw_ordinal",
+                feature_names=bank.feature_names,
+                overwrite=overwrite,
+            )
+        ).name
+    if _wants_format(array_format, "parquet"):
+        files["clean_parquet"] = Path(
+            _write_rep_table(
+                out / "clean.parquet",
+                bank.clean,
+                rep_col="trajectory_draw_ordinal",
+                feature_names=bank.feature_names,
+                overwrite=overwrite,
+            )
+        ).name
+        files["noise_draws_parquet"] = Path(
+            _write_rep_table(
+                out / "noise_draws.parquet",
                 bank.noise_draws,
                 rep_col="noise_draw_ordinal",
                 feature_names=bank.feature_names,
@@ -494,13 +565,31 @@ def export_dgp_bank_files(
                 entry_files["npy"] = str(rel_path)
             if _wants_format(array_format, "csv"):
                 rel_path = Path("noisy") / f"{stem}.csv"
-                _write_cell_csv(
+                _write_cell_table(
                     out / rel_path,
                     noisy,
                     feature_names=bank.feature_names,
                     overwrite=overwrite,
                 )
                 entry_files["csv"] = str(rel_path)
+            if _wants_format(array_format, "ipc"):
+                rel_path = Path("noisy") / f"{stem}.ipc"
+                _write_cell_table(
+                    out / rel_path,
+                    noisy,
+                    feature_names=bank.feature_names,
+                    overwrite=overwrite,
+                )
+                entry_files["ipc"] = str(rel_path)
+            if _wants_format(array_format, "parquet"):
+                rel_path = Path("noisy") / f"{stem}.parquet"
+                _write_cell_table(
+                    out / rel_path,
+                    noisy,
+                    feature_names=bank.feature_names,
+                    overwrite=overwrite,
+                )
+                entry_files["parquet"] = str(rel_path)
             noisy_entries.append(
                 {
                     "files": entry_files,
@@ -760,7 +849,10 @@ def build_noisy_bundle_for_cell(
     - no dataloaders
     - no trainer-specific masks
     """
-    if db_clean.trajectory_draw_ordinal is not None and db_clean.trajectory_draw_ordinal != cell.trajectory_draw_ordinal:
+    if (
+        db_clean.trajectory_draw_ordinal is not None
+        and db_clean.trajectory_draw_ordinal != cell.trajectory_draw_ordinal
+    ):
         raise ValueError(
             "clean bundle/cell draw mismatch: "
             f"db_clean.trajectory_draw_ordinal={db_clean.trajectory_draw_ordinal}, cell.trajectory_draw_ordinal={cell.trajectory_draw_ordinal}. "

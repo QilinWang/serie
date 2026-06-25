@@ -12,8 +12,15 @@ from typing import Annotated, Any, Literal, cast
 
 import attrs
 import cappa
+import numpy as np
 
-from . import PartitionSpec, export_dgp_bank_files, build_dgp_bank, inject_noise
+from . import (
+    PartitionSpec,
+    build_dgp_bank,
+    build_empirical_dgp_bank,
+    export_dgp_bank_files,
+    inject_noise,
+)
 from .catalog import list_sources, source_preset
 from .pipeline import KnownDataID, DrawDesign, known_data_root
 from .specs import ShockSchedule, TrajectorySpec
@@ -23,10 +30,11 @@ OutputFormat = Literal["text", "json"]
 PlotKind = Literal["timeseries", "attractor", "both"]
 PlotRequest = Literal["none", "timeseries", "attractor", "both"]
 PlotFormat = Literal["png", "pdf", "svg"]
-ArrayFormat = Literal["npy", "csv", "both"]
-ArrayRequest = Literal["none", "npy", "csv", "both"]
+ArrayFormat = Literal["npy", "csv", "ipc", "parquet", "table", "all"]
+ArrayRequest = Literal["none", "npy", "csv", "ipc", "parquet", "table", "all"]
 ShockRequest = Literal["none", "param", "state", "switch"]
-_DEMO_SOURCES = ("lorenz", "rossler", "chua")
+_DEMO_SOURCES = ("lorenz", "rossler", "chua", "vanderpol", "henon", "logistic")
+_DEMO_CANDIDATE_SOURCES: tuple[str, ...] = ()
 
 
 _PARTITIONS = {
@@ -81,7 +89,7 @@ _CLI_COMMANDS = (
         "group": "05 audit",
         "command": "walkthrough",
         "summary": "Author/reviewer audit: generate arrays, plots, and verification metadata.",
-        "example": "serie walkthrough --out tmp/walkthrough --array-format both --overwrite --format json",
+        "example": "serie walkthrough --out tmp/walkthrough --array-format all --overwrite --format json",
     },
     {
         "group": "06 metadata",
@@ -178,9 +186,7 @@ def _reference_source_for_plot(source: TrajectorySpec) -> TrajectorySpec | None:
     return attrs.evolve(source, shocks=ShockSchedule.none())
 
 
-def _bank_payload(
-    source: str, *, seed: int, noise_kind: str, verbose: bool
-) -> dict[str, Any]:
+def _bank_payload(source: str, *, seed: int, noise_kind: str, verbose: bool) -> dict[str, Any]:
     source = _require_source(source)
     bank = build_dgp_bank(source, seed=seed, noise_kind=noise_kind, verbose=verbose)
     return {
@@ -430,7 +436,9 @@ def _export_payload(
 def _parse_features_idx(value: str) -> tuple[int, int, int]:
     parts = tuple(int(part.strip()) for part in value.split(",") if part.strip())
     if len(parts) != 3:
-        raise SystemExit("--features-idx must contain exactly three comma-separated indices, e.g. 0,1,2")
+        raise SystemExit(
+            "--features-idx must contain exactly three comma-separated indices, e.g. 0,1,2"
+        )
     return parts
 
 
@@ -774,7 +782,8 @@ class Generate:
     ] = "p70_20_10"
 
     # Artifact controls. With no `--out`, generate prints metadata only. With
-    # `--out`, choose arrays (`npy`, `csv`, `both`) and/or static plots.
+    # `--out`, choose arrays (`npy`, `csv`, `ipc`, `parquet`, `table`, `all`)
+    # and/or static plots.
     out: Annotated[
         Path | None,
         cappa.Arg(
@@ -786,7 +795,7 @@ class Generate:
         ArrayRequest,
         cappa.Arg(
             long=True,
-            help="Array export format: none, npy, csv, or both.",
+            help="Array export format: none, npy, csv, ipc, parquet, table, or all.",
         ),
     ] = "none"
     plot: Annotated[
@@ -945,7 +954,7 @@ class Export:
     n_noise_draws: Annotated[int, cappa.Arg(long=True)] = 1
     noise_seed_base: Annotated[int, cappa.Arg(long=True)] = 1000
     sigma: Annotated[float | None, cappa.Arg(long=True)] = None
-    array_format: Annotated[ArrayFormat, cappa.Arg(long=True)] = "both"
+    array_format: Annotated[ArrayFormat, cappa.Arg(long=True)] = "all"
     draw_design: Annotated[DrawDesign, cappa.Arg(long=True)] = DrawDesign.AUTO
     noise_kind: Annotated[str, cappa.Arg(long=True)] = "gaussian"
     overwrite: Annotated[bool, cappa.Arg(long=True)] = False
@@ -1019,7 +1028,7 @@ class Walkthrough:
     out: Annotated[Path, cappa.Arg(long=True)] = Path("serie_walkthrough")
     seed: Annotated[int, cappa.Arg(long=True)] = 42
     sigma: Annotated[float, cappa.Arg(long=True)] = 0.1
-    array_format: Annotated[ArrayFormat, cappa.Arg(long=True)] = "both"
+    array_format: Annotated[ArrayFormat, cappa.Arg(long=True)] = "all"
     kind: Annotated[PlotKind, cappa.Arg(long=True)] = "both"
     max_points: Annotated[int, cappa.Arg(long=True)] = 2000
     overwrite: Annotated[bool, cappa.Arg(long=True)] = False
@@ -1045,43 +1054,178 @@ def _demo_template_dir() -> Path:
     return Path(__file__).resolve().parent / "demo_dist"
 
 
-def _bake_demo_json(
-    source: str, *, seed: int, n_points: int, n_draws: int,
-) -> dict[str, Any]:
-    """Bake one 3D attractor + frozen noise draws into a JSON-serializable dict."""
-    import numpy as np
-    from .catalog import source_preset
+def _demo_source_spec(source: str) -> TrajectorySpec:
+    """Return a spec for the browser demo.
 
-    if source not in _DEMO_SOURCES:
-        valid = ", ".join(_DEMO_SOURCES)
-        raise SystemExit(f"unknown demo source {source!r}; valid demo sources: {valid}")
+    The browser viewer always receives a 3D projection. Native 1D/2D systems
+    are padded or projected so the same React/Three template can render them.
+    """
+    source = _normalize_source_name(source)
+    if source in _DEMO_SOURCES:
+        return source_preset(source)()
+
+    valid = ", ".join(_DEMO_SOURCES + _DEMO_CANDIDATE_SOURCES)
+    raise SystemExit(f"unknown demo source {source!r}; valid demo sources: {valid}")
+
+
+def _project_demo_arrays(
+    clean: np.ndarray,
+    draws: np.ndarray,
+    feature_names: tuple[str, ...],
+) -> tuple[np.ndarray, np.ndarray, list[str], str]:
+    """Project any source dimension into the 3D browser viewer contract."""
+    T, D = clean.shape
+    if D >= 3:
+        return (
+            np.ascontiguousarray(clean[:, :3], dtype=np.float32),
+            np.ascontiguousarray(draws[:, :, :3], dtype=np.float32),
+            list(feature_names[:3]),
+            "first_three_channels" if D > 3 else "native_3d",
+        )
+    if D == 2:
+        zeros = np.zeros((T, 1), dtype=np.float32)
+        draw_zeros = np.zeros((draws.shape[0], T, 1), dtype=np.float32)
+        return (
+            np.ascontiguousarray(np.concatenate([clean, zeros], axis=1), dtype=np.float32),
+            np.ascontiguousarray(np.concatenate([draws, draw_zeros], axis=2), dtype=np.float32),
+            [*feature_names, "zero"],
+            "2d_padded_z0",
+        )
+    if D == 1:
+        time_axis = np.linspace(-1.0, 1.0, T, dtype=np.float32)[:, None]
+        zeros = np.zeros((T, 1), dtype=np.float32)
+        draw_zeros = np.zeros((draws.shape[0], T, 1), dtype=np.float32)
+        return (
+            np.ascontiguousarray(
+                np.concatenate([time_axis, clean, zeros], axis=1), dtype=np.float32
+            ),
+            np.ascontiguousarray(
+                np.concatenate([draw_zeros, draws, draw_zeros], axis=2), dtype=np.float32
+            ),
+            ["time", feature_names[0], "zero"],
+            "1d_time_value_z0",
+        )
+    raise SystemExit(f"demo source has invalid D={D}")
+
+
+def _load_demo_values(path: Path) -> tuple[np.ndarray, tuple[str, ...]]:
+    """Load a local array file for the demo exporter.
+
+    This is intentionally CLI-side.  The browser viewer consumes one explicit
+    JSON contract; CSV/NPY parsing stays in Python where Polars/NumPy own the
+    format details.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".npy":
+        values = np.asarray(np.load(path), dtype=np.float32)
+        if values.ndim == 1:
+            values = values[:, None]
+        if values.ndim != 2:
+            raise SystemExit(f"{path} must contain a [T, D] array, got shape {values.shape}")
+        return values, tuple(f"f{i}" for i in range(values.shape[1]))
+
+    if suffix == ".csv":
+        import polars as pl
+
+        df = pl.read_csv(path)
+        ignored = {"t", "time", "timestamp", "date", "datetime", "index"}
+        numeric_columns: list[str] = []
+        for column in df.columns:
+            if column.lower() in ignored:
+                continue
+            try:
+                df[column].cast(pl.Float32, strict=True)
+            except (pl.exceptions.PolarsError, TypeError, ValueError):
+                continue
+            numeric_columns.append(column)
+        if not numeric_columns:
+            raise SystemExit(f"{path} has no numeric value columns for the demo viewer")
+        values = np.asarray(df.select(numeric_columns).to_numpy(), dtype=np.float32)
+        return values, tuple(numeric_columns)
+
+    raise SystemExit(f"unsupported demo input {path}; expected .csv or .npy")
+
+
+def _bake_demo_json(
+    source: str,
+    *,
+    seed: int,
+    n_points: int,
+    n_draws: int,
+) -> dict[str, Any]:
+    """Bake one trajectory + frozen noise draws into the 3D viewer contract."""
     if n_points <= 1:
         raise SystemExit("--n-points must be greater than 1")
     if n_draws < 1:
         raise SystemExit("--n-draws must be at least 1")
 
-    spec = source_preset(source)()
+    source = _normalize_source_name(source)
+    spec = _demo_source_spec(source)
     bank = build_dgp_bank(spec, seed=seed, n_noise_draws=n_draws)
 
     clean = np.asarray(bank.clean[0], dtype=np.float32)
     draws = np.asarray(bank.noise_draws, dtype=np.float32)
-
-    if clean.shape[1] < 3:
-        raise SystemExit(f"{source!r} has D={clean.shape[1]}; the demo requires a 3D source")
 
     if clean.shape[0] > n_points:
         idx = np.linspace(0, clean.shape[0] - 1, n_points).astype(np.int64)
         clean = clean[idx]
         draws = draws[:, idx, :]
 
-    clean = np.ascontiguousarray(clean[:, :3], dtype=np.float32)
-    draws = np.ascontiguousarray(draws[:, :, :3], dtype=np.float32)
+    clean, draws, feature_names, projection = _project_demo_arrays(clean, draws, bank.feature_names)
 
     return {
         "system": source,
         "seed": int(seed),
-        "feature_names": list(bank.feature_names[:3]),
+        "source_dim": int(bank.D),
+        "projection": projection,
+        "feature_names": feature_names,
         "dt": float(spec.dt),
+        "n_points": int(clean.shape[0]),
+        "clean": clean.tolist(),
+        "draws": draws.tolist(),
+    }
+
+
+def _bake_demo_json_from_file(
+    input_path: Path,
+    *,
+    name: str | None,
+    seed: int,
+    n_points: int,
+    n_draws: int,
+) -> dict[str, Any]:
+    """Bake a local CSV/NPY array into the browser demo JSON contract."""
+    if n_points <= 1:
+        raise SystemExit("--n-points must be greater than 1")
+    if n_draws < 1:
+        raise SystemExit("--n-draws must be at least 1")
+    if not input_path.exists():
+        raise SystemExit(f"{input_path} does not exist")
+
+    values, feature_names = _load_demo_values(input_path)
+    bank = build_empirical_dgp_bank(
+        values,
+        name=name or input_path.stem,
+        noise_seed_base=seed,
+        n_noise_draws=n_draws,
+        feature_names=feature_names,
+    )
+    clean = np.asarray(bank.clean[0], dtype=np.float32)
+    draws = np.asarray(bank.noise_draws, dtype=np.float32)
+    if clean.shape[0] > n_points:
+        idx = np.linspace(0, clean.shape[0] - 1, n_points).astype(np.int64)
+        clean = clean[idx]
+        draws = draws[:, idx, :]
+    clean, draws, projected_names, projection = _project_demo_arrays(
+        clean, draws, bank.feature_names
+    )
+    return {
+        "system": bank.name,
+        "seed": int(seed),
+        "source_dim": int(bank.D),
+        "projection": projection,
+        "feature_names": projected_names,
+        "dt": 1.0,
         "n_points": int(clean.shape[0]),
         "clean": clean.tolist(),
         "draws": draws.tolist(),
@@ -1092,6 +1236,9 @@ def _demo_payload(
     source: str,
     *,
     out: Path,
+    input_path: Path | None,
+    input_name: str | None,
+    data_out: Path | None,
     seed: int,
     n_points: int,
     n_draws: int,
@@ -1099,6 +1246,8 @@ def _demo_payload(
 ) -> dict[str, Any]:
     if out.exists() and not overwrite:
         raise SystemExit(f"{out} already exists; pass --overwrite to replace it")
+    if data_out is not None and data_out.exists() and not overwrite:
+        raise SystemExit(f"{data_out} already exists; pass --overwrite to replace it")
 
     template_dir = _demo_template_dir()
     index_html = template_dir / "index.html"
@@ -1108,8 +1257,21 @@ def _demo_payload(
             f"If installing from source, run: cd serie/demo && bun run build && cp -R dist ../demo_dist"
         )
 
-    payload = _bake_demo_json(source, seed=seed, n_points=n_points, n_draws=n_draws)
+    payload = (
+        _bake_demo_json_from_file(
+            input_path,
+            name=input_name,
+            seed=seed,
+            n_points=n_points,
+            n_draws=n_draws,
+        )
+        if input_path is not None
+        else _bake_demo_json(source, seed=seed, n_points=n_points, n_draws=n_draws)
+    )
     data_json = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    if data_out is not None:
+        data_out.parent.mkdir(parents=True, exist_ok=True)
+        data_out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     html = index_html.read_text(encoding="utf-8")
 
@@ -1131,7 +1293,7 @@ def _demo_payload(
             )
             inject = (
                 f"<script>window.__SERIE_DEMO_DATA__={data_json};</script>\n"
-                f"<script type=\"module\">{content}</script>"
+                f'<script type="module">{content}</script>'
             )
             html = html.replace("</body>", f"{inject}\n</body>")
             injected_scripts += 1
@@ -1143,10 +1305,12 @@ def _demo_payload(
     out.write_text(html, encoding="utf-8")
     return {
         "out": str(out),
-        "source": source,
+        "source": str(payload["system"]),
+        "input": None if input_path is None else str(input_path),
         "seed": seed,
         "n_points": payload["n_points"],
         "n_draws": n_draws,
+        "data_out": None if data_out is None else str(data_out),
         "bytes": len(html),
     }
 
@@ -1154,10 +1318,22 @@ def _demo_payload(
 @cappa.command
 @attrs.define
 class Demo:
-    """Generate an interactive 3D attractor HTML page with controllable noise."""
+    """Generate an interactive 3D trajectory HTML page with controllable noise."""
 
     source: Annotated[str, cappa.Arg(default="lorenz")]
     out: Annotated[Path, cappa.Arg(long=True)] = Path("serie_demo.html")
+    input: Annotated[
+        Path | None,
+        cappa.Arg(
+            long=True,
+            help="Optional local .csv or .npy [T, D] array to visualize instead of a built-in source.",
+        ),
+    ] = None
+    input_name: Annotated[
+        str | None,
+        cappa.Arg(long=True, help="Display name for --input data. Defaults to the file stem."),
+    ] = None
+    data_out: Annotated[Path | None, cappa.Arg(long=True)] = None
     seed: Annotated[int, cappa.Arg(long=True)] = 42
     n_points: Annotated[int, cappa.Arg(long=True)] = 4000
     n_draws: Annotated[int, cappa.Arg(long=True)] = 5
@@ -1169,6 +1345,9 @@ class Demo:
             lambda: _demo_payload(
                 self.source,
                 out=self.out,
+                input_path=self.input,
+                input_name=self.input_name,
+                data_out=self.data_out,
                 seed=self.seed,
                 n_points=self.n_points,
                 n_draws=self.n_draws,
@@ -1195,7 +1374,19 @@ class Version:
 class Serie:
     """SERIE: generate, inspect, export, and visualize controlled time-series cells."""
 
-    cmd: cappa.Subcommands[Commands | List | DataDir | Inspect | Generate | InjectNoise | Export | Plot | Walkthrough | Demo | Version]
+    cmd: cappa.Subcommands[
+        Commands
+        | List
+        | DataDir
+        | Inspect
+        | Generate
+        | InjectNoise
+        | Export
+        | Plot
+        | Walkthrough
+        | Demo
+        | Version
+    ]
 
 
 def main(argv: list[str] | None = None) -> None:
