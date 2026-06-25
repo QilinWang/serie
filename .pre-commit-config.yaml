@@ -1,0 +1,14 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff lint
+        entry: bash -lc 'UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" ruff check .'
+        language: system
+        pass_filenames: false
+
+      - id: pyright
+        name: Pyright
+        entry: bash -lc 'UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" pyright'
+        language: system
+        pass_filenames: false

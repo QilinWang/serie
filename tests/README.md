@@ -10,6 +10,8 @@ Use file names to show intent.
 - `test_titration_edges.py` — DGP-bank and titration invariants: determinism,
   common random numbers, noise laws, draw pairing, train-only statistics,
   provenance, and export round trips.
+- `test_properties.py` — randomized property tests for invariants that should
+  hold across many seeds, sigma values, and legal partition boundaries.
 - `test_public_contracts.py` — public API contracts and defensive behavior:
   renamed fields, shape validation, alias safety, feature-name flow, split
   slicing, and high-level edge cases.
@@ -22,6 +24,8 @@ Use file names to show intent.
 - Generator math or an equation-level property: `test_gen.py`.
 - Noise injection, draw semantics, or protocol invariants:
   `test_titration_edges.py`.
+- Algebra or split invariants that should hold for many generated inputs:
+  `test_properties.py`.
 - Public API behavior that protects users from silent mistakes:
   `test_public_contracts.py`.
 - Command-line behavior: `test_cli.py`.
@@ -29,4 +33,3 @@ Use file names to show intent.
 
 Prefer fast, explicit contract tests over broad slow sweeps. Slow visual or
 every-system audits belong in maintainer scripts, not the default pytest suite.
-

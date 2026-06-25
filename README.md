@@ -1,5 +1,10 @@
 # SERIE
 
+[![CI](https://github.com/QilinWang/serie/actions/workflows/ci.yml/badge.svg)](https://github.com/QilinWang/serie/actions/workflows/ci.yml)
+[![Pages Demo](https://github.com/QilinWang/serie/actions/workflows/pages-demo.yml/badge.svg)](https://github.com/QilinWang/serie/actions/workflows/pages-demo.yml)
+[![PyPI](https://img.shields.io/pypi/v/serie.svg)](https://pypi.org/project/serie/)
+[![Downloads](https://static.pepy.tech/badge/serie/month)](https://pepy.tech/project/serie)
+
 [中文说明](README.zh-CN.md)
 
 **Stress-test a time-series forecaster before you ship it — against the regime shifts and measurement noise *you* know it will face, with ground truth known exactly.**

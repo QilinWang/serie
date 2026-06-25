@@ -86,6 +86,31 @@ def test_cli_generate_prints_one_cell_json(capsys):
     assert payload["artifacts"] is None
 
 
+def test_cli_generate_json_schema_is_stable(capsys):
+    cli.main(["generate", "ou", "--sigma", "0.1", "--array-format", "none", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert sorted(payload) == [
+        "artifacts",
+        "cell_tag",
+        "name",
+        "noise_kind",
+        "partition",
+        "shape",
+        "shock",
+        "sigma",
+        "sigma_scale",
+        "source",
+        "train_stats",
+    ]
+    assert sorted(payload["shape"]) == ["full", "test", "train", "val"]
+    assert sorted(payload["train_stats"]) == ["mean_head", "std_head"]
+    assert payload["shape"]["full"] == [25001, 1]
+    assert payload["shape"]["train"] == [17500, 1]
+    assert payload["shape"]["val"] == [5000, 1]
+    assert payload["shape"]["test"] == [2501, 1]
+
+
 def test_cli_generate_writes_arrays_and_plot_for_shock(tmp_path, capsys):
     pytest.importorskip("matplotlib")
     out = tmp_path / "generated"

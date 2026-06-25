@@ -36,7 +36,12 @@ jobs:
         run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" pyright
 
       - name: Pytest
+        if: matrix.python-version != '3.12'
         run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q
+
+      - name: Pytest with coverage
+        if: matrix.python-version == '3.12'
+        run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q --cov --cov-report=term-missing --cov-report=xml
 
   build-wheel:
     name: Build and inspect wheel

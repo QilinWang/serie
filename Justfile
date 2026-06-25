@@ -59,6 +59,21 @@ dev-lint:
 dev-type:
     UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" pyright
 
+# Run pytest and print a source coverage report.
+[group("03 author-dev")]
+dev-coverage:
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q --cov --cov-report=term-missing --cov-report=xml
+
+# Install local pre-commit hooks into .git/hooks/.
+[group("03 author-dev")]
+dev-hooks-install:
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with "pre-commit>=4.0" pre-commit install
+
+# Run the pre-commit quality hooks across the whole checkout.
+[group("03 author-dev")]
+dev-hooks-run:
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with "pre-commit>=4.0" pre-commit run --all-files
+
 # Local version of the GitHub CI gate: lint, type-check, and test.
 [group("03 author-dev")]
 ci-check:
