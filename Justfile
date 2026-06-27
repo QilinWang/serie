@@ -1,37 +1,39 @@
 set dotenv-load := true
 
 version := "0.1.1"
+uv_serie := "UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie"
+uv_dev := "UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable '.[dev,diagnostics]'"
 
 # Print the CLI command menu as JSON; no args. JSON is for scripts/agents to parse.
 [group("01 commands-and-data")]
 list-cli-commands:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie list-cli-commands --format json
+    {{uv_serie}} list-cli-commands --format json
 
 # Print synthetic source names and known dataset IDs as JSON; no args.
 [group("01 commands-and-data")]
 list-data-ids:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie list-data-ids --format json
+    {{uv_serie}} list-data-ids --format json
 
 # Print the known-data folder path/existence as JSON; no args.
 [group("01 commands-and-data")]
 show-data-dir:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie show-data-dir --format json
+    {{uv_serie}} show-data-dir --format json
 
 # Print generated-cell JSON; args: source=data ID, sigma=noise dose, shock=intervention, partition=split. Defaults: ou, 0.1, none, p70_20_10.
 [group("01 commands-and-data")]
 build-cell source="ou" sigma="0.1" shock="none" partition="p70_20_10":
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie generate {{source}} --shock {{shock}} --sigma {{sigma}} --partition {{partition}}
+    {{uv_serie}} generate {{source}} --shock {{shock}} --sigma {{sigma}} --partition {{partition}}
 
 # Run the walkthrough and print JSON; default out=tmp/walkthrough, overwrites that output.
 [group("02 author-walkthrough")]
 walkthrough-run out="tmp/walkthrough":
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie walkthrough --out {{out}} --overwrite --format json
+    {{uv_serie}} walkthrough --out {{out}} --overwrite --format json
 
 # Meaningful every-system visual audit: clean/noise plus intervention cases, PNGs only.
 [group("02 author-walkthrough")]
 system-check out="tmp/system_check":
     just clean-system-check {{out}}
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" python ../docs/serie_release/system_check.py --out {{out}}
+    {{uv_dev}} python ../docs/serie_release/system_check.py --out {{out}}
 
 # Check the checkout end-to-end: source quality, tests, wheel build, and clean install.
 [group("03 check")]
@@ -42,9 +44,9 @@ check:
 # Unit under `check`: Ruff, Pyright, and pytest coverage.
 [group("03 check")]
 check-source:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" ruff check .
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" pyright
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q --cov --cov-report=term-missing --cov-report=xml
+    {{uv_dev}} ruff check .
+    {{uv_dev}} pyright
+    {{uv_dev}} python -m pytest tests -q --cov --cov-report=term-missing --cov-report=xml
 
 # Unit under `check`: build dist, install the wheel cleanly, and smoke-test the installed CLI.
 [group("03 check")]
@@ -99,7 +101,7 @@ build-dist-release:
 [group("05 demo")]
 build-demo-static:
     mkdir -p tmp/deploy_site
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo shapes --out-html tmp/deploy_site/index.html --overwrite --format json
+    {{uv_dev}} serie demo shapes --out-html tmp/deploy_site/index.html --overwrite --format json
 
 # Optional: create/update persistent local .venv; normal recipes do not need it.
 [group("05 dev")]
@@ -120,12 +122,12 @@ dev-demo-template:
 dev-demo-inspect out="tmp/candidate_demos":
     rm -rf {{out}}
     mkdir -p {{out}}
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo lorenz --out-html {{out}}/lorenz.html --data-out {{out}}/lorenz.json --n-points 4000 --n-draws 5 --overwrite --format json
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo rossler --out-html {{out}}/rossler.html --data-out {{out}}/rossler.json --n-points 4000 --n-draws 5 --overwrite --format json
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo chua --out-html {{out}}/chua.html --data-out {{out}}/chua.json --n-points 4000 --n-draws 5 --overwrite --format json
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo vanderpol --out-html {{out}}/vanderpol.html --data-out {{out}}/vanderpol.json --n-points 4000 --n-draws 5 --overwrite --format json
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo henon --out-html {{out}}/henon.html --data-out {{out}}/henon.json --n-points 4000 --n-draws 5 --overwrite --format json
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo logistic --out-html {{out}}/logistic.html --data-out {{out}}/logistic.json --n-points 4000 --n-draws 5 --overwrite --format json
+    {{uv_dev}} serie demo lorenz --out-html {{out}}/lorenz.html --data-out {{out}}/lorenz.json --n-points 4000 --n-draws 5 --overwrite --format json
+    {{uv_dev}} serie demo rossler --out-html {{out}}/rossler.html --data-out {{out}}/rossler.json --n-points 4000 --n-draws 5 --overwrite --format json
+    {{uv_dev}} serie demo chua --out-html {{out}}/chua.html --data-out {{out}}/chua.json --n-points 4000 --n-draws 5 --overwrite --format json
+    {{uv_dev}} serie demo vanderpol --out-html {{out}}/vanderpol.html --data-out {{out}}/vanderpol.json --n-points 4000 --n-draws 5 --overwrite --format json
+    {{uv_dev}} serie demo henon --out-html {{out}}/henon.html --data-out {{out}}/henon.json --n-points 4000 --n-draws 5 --overwrite --format json
+    {{uv_dev}} serie demo logistic --out-html {{out}}/logistic.html --data-out {{out}}/logistic.json --n-points 4000 --n-draws 5 --overwrite --format json
 
 # Run the full check, then upload dist/ files to PyPI. Requires UV_PUBLISH_TOKEN.
 [group("04 release")]
