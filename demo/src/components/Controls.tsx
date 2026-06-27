@@ -1,10 +1,12 @@
 import { Card } from "./ui/card";
 import { Slider } from "./ui/slider";
 import { Switch } from "./ui/switch";
+import type { DemoData } from "../lib/noise";
 
 type ControlsProps = {
   sigma: number;
   showNoisy: boolean;
+  systems: DemoData[];
   system: string;
   seed: number;
   nPoints: number;
@@ -13,6 +15,8 @@ type ControlsProps = {
   hasNoiseDraws: boolean;
   sourceDim?: number;
   projection?: string;
+  shape?: DemoData["shape"];
+  onSystemChange: (system: string) => void;
   onSigmaChange: (sigma: number) => void;
   onShowNoisyChange: (show: boolean) => void;
   onDrawIndexChange: (index: number) => void;
@@ -22,6 +26,7 @@ type ControlsProps = {
 export function Controls({
   sigma,
   showNoisy,
+  systems,
   system,
   seed,
   nPoints,
@@ -30,15 +35,19 @@ export function Controls({
   hasNoiseDraws,
   sourceDim,
   projection,
+  shape,
+  onSystemChange,
   onSigmaChange,
   onShowNoisyChange,
   onDrawIndexChange,
   onLoadDataFile,
 }: ControlsProps) {
   const drawOptions = Array.from({ length: nDraws }, (_, index) => index);
+  const cleanShape = shape?.clean ?? [nPoints, 3];
+  const drawShape = shape?.draws ?? [nDraws, nPoints, 3];
 
   return (
-    <Card className="w-full max-w-sm p-4">
+    <Card className="max-h-[calc(100vh-2rem)] w-full max-w-sm overflow-y-auto p-4">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.18em] text-cyan-200/80">SERIE</p>
@@ -55,6 +64,27 @@ export function Controls({
       </p>
 
       <div className="mt-5 rounded-md border border-white/10 bg-white/[0.04] px-3 py-2">
+        <label htmlFor="system-select" className="text-sm font-medium text-slate-100">
+          System
+        </label>
+        <select
+          id="system-select"
+          value={system}
+          onChange={(event) => onSystemChange(event.currentTarget.value)}
+          className="mt-2 h-9 w-full rounded-md border border-cyan-200/20 bg-black/40 px-2 text-sm font-mono text-cyan-100 outline-none focus:border-cyan-200"
+        >
+          {systems.map((item) => {
+            const itemShape = item.shape?.clean ?? [item.n_points, item.source_dim ?? 3];
+            return (
+              <option key={item.system} value={item.system}>
+                {item.system} · {itemShape[0]}x{itemShape[1]}
+              </option>
+            );
+          })}
+        </select>
+      </div>
+
+      <div className="mt-3 rounded-md border border-white/10 bg-white/[0.04] px-3 py-2">
         <label htmlFor="data-json" className="text-sm font-medium text-slate-100">
           Load local JSON
         </label>
@@ -140,6 +170,12 @@ export function Controls({
           <dd className="mt-1 font-mono text-slate-100">{system}</dd>
         </div>
         <div className="rounded-md bg-white/[0.04] p-2">
+          <dt className="text-slate-500">clean shape</dt>
+          <dd className="mt-1 font-mono text-slate-100">
+            {cleanShape[0]}x{cleanShape[1]}
+          </dd>
+        </div>
+        <div className="rounded-md bg-white/[0.04] p-2">
           <dt className="text-slate-500">seed</dt>
           <dd className="mt-1 font-mono text-slate-100">{seed}</dd>
         </div>
@@ -149,7 +185,9 @@ export function Controls({
         </div>
         <div className="rounded-md bg-white/[0.04] p-2">
           <dt className="text-slate-500">draws</dt>
-          <dd className="mt-1 font-mono text-slate-100">{nDraws}</dd>
+          <dd className="mt-1 font-mono text-slate-100">
+            {drawShape[0]}x{drawShape[1]}x{drawShape[2]}
+          </dd>
         </div>
         <div className="rounded-md bg-white/[0.04] p-2">
           <dt className="text-slate-500">source dim</dt>

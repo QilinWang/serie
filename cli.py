@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import contextlib
+from enum import Enum
+import hashlib
 import io
 import json
 import logging
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+import re
+from typing import Annotated, Any, Literal, Mapping, cast
 
 import attrs
 import cappa
@@ -33,8 +36,13 @@ PlotFormat = Literal["png", "pdf", "svg"]
 ArrayFormat = Literal["npy", "csv", "ipc", "parquet", "table", "all"]
 ArrayRequest = Literal["none", "npy", "csv", "ipc", "parquet", "table", "all"]
 ShockRequest = Literal["none", "param", "state", "switch"]
+_DEMO_SHAPE_SOURCES = ("lorenz", "rossler", "chua")
 _DEMO_SOURCES = ("lorenz", "rossler", "chua", "vanderpol", "henon", "logistic")
-_DEMO_CANDIDATE_SOURCES: tuple[str, ...] = ()
+_DEMO_CANDIDATE_SOURCES: tuple[str, ...] = ("garch",)
+_DEMO_SOURCE_GROUPS = {
+    "shapes": _DEMO_SHAPE_SOURCES,
+    "all": _DEMO_SOURCES,
+}
 
 
 _PARTITIONS = {
@@ -51,21 +59,21 @@ _PARTITIONS = {
 _CLI_COMMANDS = (
     {
         "group": "01 discovery",
-        "command": "commands",
+        "command": "list-cli-commands",
         "summary": "List SERIE CLI commands with examples.",
-        "example": "serie commands --format json",
+        "example": "serie list-cli-commands --format json",
     },
     {
         "group": "01 discovery",
-        "command": "list",
+        "command": "list-data-ids",
         "summary": "List built-in synthetic sources and known external dataset names.",
-        "example": "serie list --format json",
+        "example": "serie list-data-ids --format json",
     },
     {
         "group": "01 discovery",
-        "command": "data-dir",
+        "command": "show-data-dir",
         "summary": "Print the external dataset directory used for known datasets.",
-        "example": "serie data-dir --format json",
+        "example": "serie show-data-dir --format json",
     },
     {
         "group": "02 generate",
@@ -77,13 +85,7 @@ _CLI_COMMANDS = (
         "group": "03 visualize",
         "command": "demo",
         "summary": "Generate an interactive 3D attractor HTML page with controllable noise.",
-        "example": "serie demo lorenz --out lorenz_demo.html",
-    },
-    {
-        "group": "04 inspect",
-        "command": "inspect",
-        "summary": "Diagnostic: build one DGP bank and report shape, feature names, and seed provenance.",
-        "example": "serie inspect lorenz --format json",
+        "example": "serie demo lorenz --out-html lorenz_demo.html",
     },
     {
         "group": "05 audit",
@@ -141,6 +143,54 @@ def _require_partition(name: str) -> str:
     return name
 
 
+def _canonical_value(value: Any) -> Any:
+    """Convert SERIE config objects into JSON-stable values for hashing."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if attrs.has(value.__class__):
+        out: dict[str, Any] = {}
+        for field in attrs.fields(value.__class__):
+            if field.name.startswith("_"):
+                continue
+            out[field.name] = _canonical_value(getattr(value, field.name))
+        return out
+    if isinstance(value, Mapping):
+        return {str(_canonical_value(k)): _canonical_value(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_canonical_value(item) for item in value]
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _canonical_value(item())
+        except Exception:
+            pass
+    return str(value)
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        _canonical_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+
+
+def _identity_hash(value: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()[:16]
+
+
+def _path_component(value: Any) -> str:
+    text = str(value).strip().lower()
+    text = re.sub(r"[^a-z0-9_=-]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text or "_adhoc"
+
+
 _SHOCK_SUFFIX_BY_REQUEST: dict[ShockRequest, str] = {
     "none": "",
     "param": "_param_shock",
@@ -186,11 +236,8 @@ def _reference_source_for_plot(source: TrajectorySpec) -> TrajectorySpec | None:
     return attrs.evolve(source, shocks=ShockSchedule.none())
 
 
-def _bank_payload(source: str, *, seed: int, noise_kind: str, verbose: bool) -> dict[str, Any]:
-    source = _require_source(source)
-    bank = build_dgp_bank(source, seed=seed, noise_kind=noise_kind, verbose=verbose)
+def _dgp_bank_metadata(bank) -> dict[str, Any]:
     return {
-        "source": source,
         "name": bank.name,
         "noise_kind": bank.noise_kind,
         "T": int(bank.T),
@@ -204,6 +251,78 @@ def _bank_payload(source: str, *, seed: int, noise_kind: str, verbose: bool) -> 
         "noise_draw_seeds": list(bank.noise_draw_seeds),
         "feature_names": list(bank.feature_names),
     }
+
+
+def _generate_cell_identity(
+    *,
+    source_key: str,
+    source_spec: TrajectorySpec,
+    shock: ShockRequest,
+    sigma: float,
+    sigma_scale: Literal["unit", "train_std"],
+    partition_name: str,
+    seed: int,
+    n_trajectory_draws: int,
+    n_noise_draws: int,
+    noise_seed_base: int,
+    noise_kind: str,
+    array_format: ArrayRequest,
+    draw_design: DrawDesign | str,
+    plot: PlotRequest,
+    series_feature_idx: int,
+    attractor_feature_idxs: tuple[int, int, int],
+    max_points: int,
+    image_format: PlotFormat,
+    dpi: int,
+) -> dict[str, Any]:
+    """Path-independent identity for one generated SERIE cell and artifact request."""
+    return {
+        "schema": "serie.generate_cell_identity.v1",
+        "source": {
+            "requested": source_key,
+            "resolved": source_spec.tag,
+            "spec": _canonical_value(source_spec),
+        },
+        "cell": {
+            "shock": shock,
+            "sigma": float(sigma),
+            "sigma_scale": sigma_scale,
+            "partition": partition_name,
+            "seed": int(seed),
+            "n_trajectory_draws": int(n_trajectory_draws),
+            "n_noise_draws": int(n_noise_draws),
+            "noise_seed_base": int(noise_seed_base),
+            "noise_kind": noise_kind,
+        },
+        "artifacts": {
+            "array_format": array_format,
+            "draw_design": None
+            if array_format == "none"
+            else DrawDesign(draw_design).value,
+            "plot": plot,
+            "plot_options": None
+            if plot == "none"
+            else {
+                "series_feature_idx": int(series_feature_idx),
+                "attractor_feature_idxs": [int(idx) for idx in attractor_feature_idxs],
+                "max_points": int(max_points),
+                "image_format": image_format,
+                "dpi": int(dpi),
+            },
+        },
+    }
+
+
+def _write_generate_cell_identity(out: Path, identity: dict[str, Any], cell_hash: str) -> Path:
+    path = out / "serie_cell_identity.json"
+    record = {
+        "schema": "serie.generate_cell_invocation.v1",
+        "cell_hash": cell_hash,
+        "cell_hash_algorithm": "sha256[:16]",
+        "identity": identity,
+    }
+    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def _split_summary_payload(
@@ -225,6 +344,7 @@ def _split_summary_payload(
         "noise_kind": bank.noise_kind,
         "partition": partition_name,
         "cell_tag": split.cell.tag if split.cell is not None else None,
+        "dgp_bank": _dgp_bank_metadata(bank),
         "shape": {
             "full": list(split.values.shape),
             "train": list(split.train_values.shape),
@@ -236,32 +356,6 @@ def _split_summary_payload(
             "std_head": _array_summary(split.train_stats.std),
         },
     }
-
-
-def _split_payload(
-    source: str,
-    *,
-    seed: int,
-    sigma: float,
-    sigma_scale: Literal["unit", "train_std"],
-    partition_name: str,
-    noise_kind: str,
-    verbose: bool,
-) -> dict[str, Any]:
-    source = _require_source(source)
-    partition_name = _require_partition(partition_name)
-    bank = build_dgp_bank(source, seed=seed, noise_kind=noise_kind, verbose=verbose)
-    partition = _PARTITIONS[partition_name]()
-    split = inject_noise(bank, sigma=sigma, sigma_scale=sigma_scale, partition=partition)
-    return _split_summary_payload(
-        source_key=source,
-        bank=bank,
-        sigma=sigma,
-        sigma_scale=sigma_scale,
-        partition_name=partition_name,
-        split=split,
-        shock="none",
-    )
 
 
 def _generate_payload(
@@ -280,25 +374,47 @@ def _generate_payload(
     array_format: ArrayRequest,
     draw_design: DrawDesign | str,
     plot: PlotRequest,
-    feature_idx: int,
-    features_idx: str,
+    series_feature_idx: int,
+    attractor_feature_idxs: str,
     max_points: int,
     image_format: PlotFormat,
     dpi: int,
-    overwrite: bool,
-    verbose: bool,
 ) -> dict[str, Any]:
     if out is None and (array_format != "none" or plot != "none"):
         raise SystemExit("--out is required when writing arrays or plots")
     if sigma_scale != "unit" and (array_format != "none" or plot != "none"):
         raise SystemExit(
-            "--sigma-scale train_std is supported for split metadata. "
+            "--sigma-scale train_std is supported for the JSON split summary. "
             "File exports and plots currently require --sigma-scale unit because "
             "they are written before partition-relative scaling can be represented."
         )
 
     source_key, source_spec = _resolve_generate_source(source, shock=shock)
     partition_name = _require_partition(partition_name)
+    parsed_attractor_feature_idxs = _parse_attractor_feature_idxs(attractor_feature_idxs)
+    cell_identity = _generate_cell_identity(
+        source_key=source_key,
+        source_spec=source_spec,
+        shock=shock,
+        sigma=sigma,
+        sigma_scale=sigma_scale,
+        partition_name=partition_name,
+        seed=seed,
+        n_trajectory_draws=n_trajectory_draws,
+        n_noise_draws=n_noise_draws,
+        noise_seed_base=noise_seed_base,
+        noise_kind=noise_kind,
+        array_format=array_format,
+        draw_design=draw_design,
+        plot=plot,
+        series_feature_idx=series_feature_idx,
+        attractor_feature_idxs=parsed_attractor_feature_idxs,
+        max_points=max_points,
+        image_format=image_format,
+        dpi=dpi,
+    )
+    cell_hash = _identity_hash(cell_identity)
+    cell_id = f"{_path_component(source_key)}_{cell_hash[:12]}"
     bank = build_dgp_bank(
         source_spec,
         seed=seed,
@@ -306,7 +422,7 @@ def _generate_payload(
         n_noise_draws=n_noise_draws,
         noise_seed_base=noise_seed_base,
         noise_kind=noise_kind,
-        verbose=verbose,
+        verbose=False,
     )
     partition = _PARTITIONS[partition_name]()
     split = inject_noise(bank, sigma=sigma, sigma_scale=sigma_scale, partition=partition)
@@ -319,21 +435,31 @@ def _generate_payload(
         split=split,
         shock=shock,
     )
+    payload["cell_hash"] = cell_hash
+    payload["cell_id"] = cell_id
 
     if out is None:
         payload["artifacts"] = None
         return payload
 
-    out.mkdir(parents=True, exist_ok=True)
-    artifacts: dict[str, Any] = {"out_dir": str(out)}
+    artifact_dir = out / cell_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    identity_path = _write_generate_cell_identity(artifact_dir, cell_identity, cell_hash)
+    artifacts: dict[str, Any] = {
+        "requested_out_dir": str(out),
+        "out_dir": str(artifact_dir),
+        "cell_id": cell_id,
+        "cell_hash": cell_hash,
+        "cell_identity": str(identity_path),
+    }
     if array_format != "none":
         manifest = export_dgp_bank_files(
             bank,
-            out,
+            artifact_dir,
             sigmas=(sigma,),
             array_format=array_format,
             draw_design=draw_design,
-            overwrite=overwrite,
+            overwrite=True,
         )
         manifest_files = cast(dict[str, object], manifest["files"])
         manifest_shape = cast(dict[str, object], manifest["shape"])
@@ -342,7 +468,7 @@ def _generate_payload(
             "array_format": array_format,
             "draw_design": DrawDesign(draw_design).value,
             "files": manifest_files,
-            "manifest": str(out / "manifest.json"),
+            "manifest": str(artifact_dir / "manifest.json"),
             "n_noisy": len(manifest_noisy),
             "shape": manifest_shape,
         }
@@ -366,17 +492,17 @@ def _generate_payload(
         )
         plot_files = plot_dgp_bank_saves(
             bank,
-            out=out,
+            out=artifact_dir,
             kind=plot,
             source=source_spec,
             reference_bank=reference_bank,
             sigma=sigma,
-            feature_idx=feature_idx,
-            features_idx=_parse_features_idx(features_idx),
+            feature_idx=series_feature_idx,
+            features_idx=parsed_attractor_feature_idxs,
             max_points=max_points,
             plot_format=image_format,
             dpi=dpi,
-            overwrite=overwrite,
+            overwrite=True,
         )
         artifacts["plots"] = {name: str(path) for name, path in plot_files.items()}
 
@@ -384,102 +510,13 @@ def _generate_payload(
     return payload
 
 
-def _export_payload(
-    source: str,
-    *,
-    out: Path,
-    seed: int,
-    n_trajectory_draws: int,
-    n_noise_draws: int,
-    noise_seed_base: int,
-    sigma: float | None,
-    array_format: ArrayFormat,
-    draw_design: DrawDesign | str,
-    noise_kind: str,
-    overwrite: bool,
-    verbose: bool,
-) -> dict[str, Any]:
-    source = _require_source(source)
-    bank = build_dgp_bank(
-        source,
-        seed=seed,
-        n_trajectory_draws=n_trajectory_draws,
-        n_noise_draws=n_noise_draws,
-        noise_seed_base=noise_seed_base,
-        noise_kind=noise_kind,
-        verbose=verbose,
-    )
-    manifest = export_dgp_bank_files(
-        bank,
-        out,
-        sigmas=() if sigma is None else (sigma,),
-        array_format=array_format,
-        draw_design=draw_design,
-        overwrite=overwrite,
-    )
-    manifest_files = cast(dict[str, object], manifest["files"])
-    manifest_shape = cast(dict[str, object], manifest["shape"])
-    manifest_noisy = cast(list[dict[str, object]], manifest["noisy"])
-    return {
-        "out_dir": str(out),
-        "source": source,
-        "name": bank.name,
-        "array_format": array_format,
-        "draw_design": DrawDesign(draw_design).value,
-        "files": manifest_files,
-        "manifest": str(out / "manifest.json"),
-        "n_noisy": len(manifest_noisy),
-        "shape": manifest_shape,
-    }
-
-
-def _parse_features_idx(value: str) -> tuple[int, int, int]:
+def _parse_attractor_feature_idxs(value: str) -> tuple[int, int, int]:
     parts = tuple(int(part.strip()) for part in value.split(",") if part.strip())
     if len(parts) != 3:
         raise SystemExit(
-            "--features-idx must contain exactly three comma-separated indices, e.g. 0,1,2"
+            "--attractor-feature-idxs must contain exactly three comma-separated indices, e.g. 0,1,2"
         )
     return parts
-
-
-def _plot_payload(
-    source: str,
-    *,
-    out: Path,
-    kind: PlotKind,
-    seed: int,
-    sigma: float,
-    noise_kind: str,
-    feature_idx: int,
-    features_idx: str,
-    max_points: int,
-    image_format: PlotFormat,
-    dpi: int,
-    overwrite: bool,
-) -> dict[str, Any]:
-    source = _require_source(source)
-    from .plots import plot_source_saves
-
-    written = plot_source_saves(
-        source,
-        out=out,
-        kind=kind,
-        seed=seed,
-        sigma=sigma,
-        noise_kind=noise_kind,
-        feature_idx=feature_idx,
-        features_idx=_parse_features_idx(features_idx),
-        max_points=max_points,
-        plot_format=image_format,
-        dpi=dpi,
-        overwrite=overwrite,
-    )
-    return {
-        "source": source,
-        "kind": kind,
-        "sigma": float(sigma),
-        "files": {name: str(path) for name, path in written.items()},
-    }
 
 
 def _file_record(path: Path) -> dict[str, Any]:
@@ -642,7 +679,7 @@ def _commands_payload() -> dict[str, Any]:
     }
 
 
-@cappa.command
+@cappa.command(name="list-cli-commands")
 @attrs.define
 class Commands:
     """List SERIE CLI commands with examples."""
@@ -671,7 +708,7 @@ class Commands:
         print(f"  {payload['help']['one_command']}")
 
 
-@cappa.command
+@cappa.command(name="list-data-ids")
 @attrs.define
 class List:
     """List built-in synthetic and known source names."""
@@ -688,7 +725,7 @@ class List:
         )
 
 
-@cappa.command(name="data-dir")
+@cappa.command(name="show-data-dir")
 @attrs.define
 class DataDir:
     """Print the external dataset directory."""
@@ -702,54 +739,42 @@ class DataDir:
 
 @cappa.command
 @attrs.define
-class Inspect:
-    """Build one source and print its shape."""
-
-    source: str
-    seed: Annotated[int, cappa.Arg(long=True)] = 42
-    noise_kind: Annotated[str, cappa.Arg(long=True)] = "gaussian"
-    format: Annotated[OutputFormat, cappa.Arg(long=True)] = "text"
-    verbose: Annotated[bool, cappa.Arg(long=True)] = False
-
-    def __call__(self) -> None:
-        _emit_payload(
-            lambda: _bank_payload(
-                self.source,
-                seed=self.seed,
-                noise_kind=self.noise_kind,
-                verbose=self.verbose,
-            ),
-            self.format,
-        )
-
-
-@cappa.command
-@attrs.define
 class Generate:
     """Generate one SERIE dataset cell.
 
-    This is the human/agent workflow command. It folds the common operations
-    into one place:
+    This is the main SERIE data command. It builds one source, optionally applies
+    a built-in intervention, injects observation noise, creates a train/val/test
+    split, and optionally writes arrays or static plots.
 
-    1. choose a source DGP, e.g. `lorenz`;
-    2. optionally choose an intervention preset with `--shock`;
-    3. choose an observation-noise dose with `--sigma`;
-    4. split into train/validation/test;
-    5. optionally write arrays and/or figures under `--out`.
+    Examples: JSON summary only = serie generate lorenz; noisy split =
+    serie generate lorenz --shock param --sigma 0.1; files =
+    serie generate lorenz --out tmp/cells --array-format all --plot both.
 
-    The command always returns split metadata. It writes files only when `--out`
-    is passed together with `--array-format` or `--plot`.
+    Defaults are chosen for a quick JSON-summary-only cell: clean baseline source,
+    no shock, no file writes, p70_20_10 split, seed 42, and JSON output.
     """
 
     # Source and intervention axis. `--shock param` turns `lorenz` into the
     # built-in `lorenz_param_shock` preset; `--shock switch` maps to
     # `lorenz_switch` where available. Use `--shock none` for the baseline DGP.
-    source: str
+    source: Annotated[
+        str,
+        cappa.Arg(
+            help=(
+                "Source data ID to generate, e.g. lorenz, ou, rossler, or a known-data ID. "
+                "Run list-data-ids to see choices. Required; no default."
+            ),
+        ),
+    ]
     shock: Annotated[
         ShockRequest,
         cappa.Arg(
             long=True,
-            help="Optional built-in intervention preset: none, param, state, or switch.",
+            help=(
+                "Intervention preset for SOURCE: none keeps the baseline; param "
+                "uses a parameter-step preset; state applies a state perturbation "
+                "preset; switch splices in a second trajectory. Unsupported pairs fail."
+            ),
         ),
     ] = "none"
 
@@ -760,14 +785,20 @@ class Generate:
         cappa.Arg(
             long=True,
             default=0.0,
-            help="Observation-noise dose. With unit-scale noise, this is the injected standard deviation.",
+            help=(
+                "Observation-noise dose used for the JSON split summary and optional noisy "
+                "exports. With --sigma-scale unit, this is the injected standard deviation."
+            ),
         ),
     ] = 0.0
     sigma_scale: Annotated[
         Literal["unit", "train_std"],
         cappa.Arg(
             long=True,
-            help="Noise scaling convention: unit or train_std.",
+            help=(
+                "Noise scaling convention: unit uses frozen unit-noise arrays; "
+                "train_std scales by each channel's train-split standard deviation."
+            ),
         ),
     ] = "unit"
 
@@ -777,32 +808,46 @@ class Generate:
         str,
         cappa.Arg(
             long=True,
-            help="Train/validation/test split preset, e.g. p70_20_10.",
+            help=(
+                "Train/validation/test split preset. Examples: p70_20_10, "
+                "p70_10_20, p70_gap_10_20. Also defines train_std noise scaling."
+            ),
         ),
     ] = "p70_20_10"
 
-    # Artifact controls. With no `--out`, generate prints metadata only. With
+    # Artifact controls. With no `--out`, generate prints the JSON summary only. With
     # `--out`, choose arrays (`npy`, `csv`, `ipc`, `parquet`, `table`, `all`)
     # and/or static plots.
     out: Annotated[
         Path | None,
         cappa.Arg(
             long=True,
-            help="Output directory for arrays, manifest, or plots. Omit to print metadata only.",
+            help=(
+                "Root directory for generated arrays, manifest, or plots. Files are "
+                "written under a stable source_hash child directory. "
+                "Omit to print only the generated-cell summary. Default: no files are written."
+            ),
         ),
     ] = None
     array_format: Annotated[
         ArrayRequest,
         cappa.Arg(
             long=True,
-            help="Array export format: none, npy, csv, ipc, parquet, table, or all.",
+            help=(
+                "File format for arrays written under --out: none, npy, csv, ipc, "
+                "parquet, table, or all. Stdout is always JSON."
+            ),
         ),
     ] = "none"
     plot: Annotated[
         PlotRequest,
         cappa.Arg(
             long=True,
-            help="Static figure export: none, timeseries, attractor, or both.",
+            help=(
+                "Static figure export: none, timeseries, attractor, or both. "
+                "Requires --out unless set to none. Uses --series-feature-idx "
+                "and --attractor-feature-idxs."
+            ),
         ),
     ] = "none"
 
@@ -814,11 +859,17 @@ class Generate:
     ] = 42
     n_trajectory_draws: Annotated[
         int,
-        cappa.Arg(long=True, help="Number of trajectory/process draws in the DGP bank."),
+        cappa.Arg(
+            long=True,
+            help="Number of trajectory/process draws in the generated bank.",
+        ),
     ] = 1
     n_noise_draws: Annotated[
         int,
-        cappa.Arg(long=True, help="Number of frozen observation-noise draws in the bank."),
+        cappa.Arg(
+            long=True,
+            help="Number of frozen observation-noise draws in the generated bank.",
+        ),
     ] = 1
     noise_seed_base: Annotated[
         int,
@@ -829,31 +880,37 @@ class Generate:
         cappa.Arg(
             long=True,
             help=(
-                "How exported noisy cells pair draws: auto, noise_only, joint, "
-                "trajectory_fixed, or cross_product."
+                "How exported noisy array cells pair trajectory draws with noise draws: "
+                "auto, noise_only, joint, trajectory_fixed, or cross_product."
             ),
         ),
     ] = DrawDesign.AUTO
     noise_kind: Annotated[
         str,
-        cappa.Arg(long=True, help="Observation-noise law for the CLI: gaussian or laplace."),
+        cappa.Arg(
+            long=True,
+            help="Distribution for frozen observation-noise draws: gaussian or laplace.",
+        ),
     ] = "gaussian"
 
-    # Plot-only options. `feature_idx` is for time-series plots; `features_idx`
-    # selects the three coordinates used by attractor plots.
-    feature_idx: Annotated[
+    # Plot-only options. `series_feature_idx` is for time-series plots;
+    # `attractor_feature_idxs` selects the three coordinates for attractor plots.
+    series_feature_idx: Annotated[
         int,
         cappa.Arg(
-            long=True,
+            long="--series-feature-idx",
             default=0,
-            help="Feature index used by time-series plots.",
+            help="Channel index for time-series plots; 0 means the first feature.",
         ),
     ] = 0
-    features_idx: Annotated[
+    attractor_feature_idxs: Annotated[
         str,
         cappa.Arg(
-            long=True,
-            help="Comma-separated feature indices for attractor plots, e.g. 0,1,2.",
+            long="--attractor-feature-idxs",
+            help=(
+                "Three comma-separated channel indices for attractor plots. "
+                "0,1,2 means the first three features."
+            ),
         ),
     ] = "0,1,2"
     max_points: Annotated[
@@ -868,21 +925,6 @@ class Generate:
         int,
         cappa.Arg(long=True, help="DPI for static plot output."),
     ] = 300
-
-    # CLI behavior. Existing output files are protected unless `--overwrite` is
-    # set; JSON is the default because agents and shell scripts consume it well.
-    overwrite: Annotated[
-        bool,
-        cappa.Arg(long=True, help="Replace existing output files."),
-    ] = False
-    format: Annotated[
-        OutputFormat,
-        cappa.Arg(long=True, help="Output format for command metadata: text or json."),
-    ] = "json"
-    verbose: Annotated[
-        bool,
-        cappa.Arg(long=True, help="Emit library progress logs."),
-    ] = False
 
     def __call__(self) -> None:
         _emit_payload(
@@ -901,122 +943,13 @@ class Generate:
                 array_format=self.array_format,
                 draw_design=self.draw_design,
                 plot=self.plot,
-                feature_idx=self.feature_idx,
-                features_idx=self.features_idx,
+                series_feature_idx=self.series_feature_idx,
+                attractor_feature_idxs=self.attractor_feature_idxs,
                 max_points=self.max_points,
                 image_format=self.image_format,
                 dpi=self.dpi,
-                overwrite=self.overwrite,
-                verbose=self.verbose,
             ),
-            self.format,
-        )
-
-
-@cappa.command
-@attrs.define
-class InjectNoise:
-    """Build, perturb, and split one source."""
-
-    source: str
-    sigma: Annotated[float, cappa.Arg(long=True, default=0.0)] = 0.0
-    sigma_scale: Annotated[Literal["unit", "train_std"], cappa.Arg(long=True)] = "unit"
-    partition: Annotated[str, cappa.Arg(long=True)] = "p70_20_10"
-    seed: Annotated[int, cappa.Arg(long=True)] = 42
-    noise_kind: Annotated[str, cappa.Arg(long=True)] = "gaussian"
-    format: Annotated[OutputFormat, cappa.Arg(long=True)] = "json"
-    verbose: Annotated[bool, cappa.Arg(long=True)] = False
-
-    def __call__(self) -> None:
-        _emit_payload(
-            lambda: _split_payload(
-                self.source,
-                seed=self.seed,
-                sigma=self.sigma,
-                sigma_scale=self.sigma_scale,
-                partition_name=self.partition,
-                noise_kind=self.noise_kind,
-                verbose=self.verbose,
-            ),
-            self.format,
-        )
-
-
-@cappa.command
-@attrs.define
-class Export:
-    """Export generated clean/noise arrays to NPY/CSV files."""
-
-    source: str
-    out: Annotated[Path, cappa.Arg(long=True)]
-    seed: Annotated[int, cappa.Arg(long=True)] = 42
-    n_trajectory_draws: Annotated[int, cappa.Arg(long=True)] = 1
-    n_noise_draws: Annotated[int, cappa.Arg(long=True)] = 1
-    noise_seed_base: Annotated[int, cappa.Arg(long=True)] = 1000
-    sigma: Annotated[float | None, cappa.Arg(long=True)] = None
-    array_format: Annotated[ArrayFormat, cappa.Arg(long=True)] = "all"
-    draw_design: Annotated[DrawDesign, cappa.Arg(long=True)] = DrawDesign.AUTO
-    noise_kind: Annotated[str, cappa.Arg(long=True)] = "gaussian"
-    overwrite: Annotated[bool, cappa.Arg(long=True)] = False
-    format: Annotated[OutputFormat, cappa.Arg(long=True)] = "json"
-    verbose: Annotated[bool, cappa.Arg(long=True)] = False
-
-    def __call__(self) -> None:
-        _emit_payload(
-            lambda: _export_payload(
-                self.source,
-                out=self.out,
-                seed=self.seed,
-                n_trajectory_draws=self.n_trajectory_draws,
-                n_noise_draws=self.n_noise_draws,
-                noise_seed_base=self.noise_seed_base,
-                sigma=self.sigma,
-                array_format=self.array_format,
-                draw_design=self.draw_design,
-                noise_kind=self.noise_kind,
-                overwrite=self.overwrite,
-                verbose=self.verbose,
-            ),
-            self.format,
-        )
-
-
-@cappa.command
-@attrs.define
-class Plot:
-    """Render a generated source plot."""
-
-    source: str
-    out: Annotated[Path, cappa.Arg(long=True)]
-    kind: Annotated[PlotKind, cappa.Arg(long=True)] = "timeseries"
-    seed: Annotated[int, cappa.Arg(long=True)] = 42
-    sigma: Annotated[float, cappa.Arg(long=True, default=0.0)] = 0.0
-    noise_kind: Annotated[str, cappa.Arg(long=True)] = "gaussian"
-    feature_idx: Annotated[int, cappa.Arg(long=True, default=0)] = 0
-    features_idx: Annotated[str, cappa.Arg(long=True)] = "0,1,2"
-    max_points: Annotated[int, cappa.Arg(long=True)] = 5000
-    image_format: Annotated[PlotFormat, cappa.Arg(long=True)] = "png"
-    dpi: Annotated[int, cappa.Arg(long=True)] = 300
-    overwrite: Annotated[bool, cappa.Arg(long=True)] = False
-    format: Annotated[OutputFormat, cappa.Arg(long=True)] = "json"
-
-    def __call__(self) -> None:
-        _emit_payload(
-            lambda: _plot_payload(
-                self.source,
-                out=self.out,
-                kind=self.kind,
-                seed=self.seed,
-                sigma=self.sigma,
-                noise_kind=self.noise_kind,
-                feature_idx=self.feature_idx,
-                features_idx=self.features_idx,
-                max_points=self.max_points,
-                image_format=self.image_format,
-                dpi=self.dpi,
-                overwrite=self.overwrite,
-            ),
-            self.format,
+            "json",
         )
 
 
@@ -1061,11 +994,31 @@ def _demo_source_spec(source: str) -> TrajectorySpec:
     are padded or projected so the same React/Three template can render them.
     """
     source = _normalize_source_name(source)
-    if source in _DEMO_SOURCES:
+    if source in _DEMO_SOURCES or source in _DEMO_CANDIDATE_SOURCES:
         return source_preset(source)()
 
-    valid = ", ".join(_DEMO_SOURCES + _DEMO_CANDIDATE_SOURCES)
+    groups = tuple(_DEMO_SOURCE_GROUPS)
+    valid = ", ".join(_DEMO_SOURCES + _DEMO_CANDIDATE_SOURCES + groups)
     raise SystemExit(f"unknown demo source {source!r}; valid demo sources: {valid}")
+
+
+def _resolve_demo_sources(source: str, systems: str | None) -> tuple[str, ...]:
+    """Resolve a single source, named source group, or comma-separated list."""
+    raw = systems if systems is not None else source
+    parts = tuple(_normalize_source_name(part.strip()) for part in raw.split(",") if part.strip())
+    if not parts:
+        raise SystemExit("demo source list is empty")
+
+    resolved: list[str] = []
+    for part in parts:
+        members = _DEMO_SOURCE_GROUPS.get(part, (part,))
+        for member in members:
+            if member not in resolved:
+                resolved.append(member)
+
+    for member in resolved:
+        _demo_source_spec(member)
+    return tuple(resolved)
 
 
 def _project_demo_arrays(
@@ -1181,8 +1134,33 @@ def _bake_demo_json(
         "feature_names": feature_names,
         "dt": float(spec.dt),
         "n_points": int(clean.shape[0]),
+        "shape": {
+            "clean": [int(clean.shape[0]), int(clean.shape[1])],
+            "draws": [int(draws.shape[0]), int(draws.shape[1]), int(draws.shape[2])],
+        },
         "clean": clean.tolist(),
         "draws": draws.tolist(),
+    }
+
+
+def _bake_demo_bundle_json(
+    sources: tuple[str, ...],
+    *,
+    seed: int,
+    n_points: int,
+    n_draws: int,
+) -> dict[str, Any]:
+    """Bake one or more demo systems into the browser viewer contract."""
+    systems = [
+        _bake_demo_json(source, seed=seed, n_points=n_points, n_draws=n_draws)
+        for source in sources
+    ]
+    if len(systems) == 1:
+        return systems[0]
+    return {
+        "kind": "serie_demo_bundle",
+        "default_system": systems[0]["system"],
+        "systems": systems,
     }
 
 
@@ -1227,9 +1205,19 @@ def _bake_demo_json_from_file(
         "feature_names": projected_names,
         "dt": 1.0,
         "n_points": int(clean.shape[0]),
+        "shape": {
+            "clean": [int(clean.shape[0]), int(clean.shape[1])],
+            "draws": [int(draws.shape[0]), int(draws.shape[1]), int(draws.shape[2])],
+        },
         "clean": clean.tolist(),
         "draws": draws.tolist(),
     }
+
+
+def _demo_payload_systems(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if "systems" in payload:
+        return cast(list[dict[str, Any]], payload["systems"])
+    return [payload]
 
 
 def _demo_payload(
@@ -1238,12 +1226,15 @@ def _demo_payload(
     out: Path,
     input_path: Path | None,
     input_name: str | None,
+    systems: str | None,
     data_out: Path | None,
     seed: int,
     n_points: int,
     n_draws: int,
     overwrite: bool,
 ) -> dict[str, Any]:
+    if input_path is not None and systems is not None:
+        raise SystemExit("--systems is only supported for built-in demo sources, not --input")
     if out.exists() and not overwrite:
         raise SystemExit(f"{out} already exists; pass --overwrite to replace it")
     if data_out is not None and data_out.exists() and not overwrite:
@@ -1257,6 +1248,7 @@ def _demo_payload(
             f"If installing from source, run: cd serie/demo && bun run build && cp -R dist ../demo_dist"
         )
 
+    resolved_sources = _resolve_demo_sources(source, systems)
     payload = (
         _bake_demo_json_from_file(
             input_path,
@@ -1266,7 +1258,7 @@ def _demo_payload(
             n_draws=n_draws,
         )
         if input_path is not None
-        else _bake_demo_json(source, seed=seed, n_points=n_points, n_draws=n_draws)
+        else _bake_demo_bundle_json(resolved_sources, seed=seed, n_points=n_points, n_draws=n_draws)
     )
     data_json = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
     if data_out is not None:
@@ -1303,12 +1295,15 @@ def _demo_payload(
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
+    payload_systems = _demo_payload_systems(payload)
     return {
         "out": str(out),
-        "source": str(payload["system"]),
+        "source": str(payload_systems[0]["system"]),
+        "sources": [str(item["system"]) for item in payload_systems],
+        "shapes": {str(item["system"]): item["shape"] for item in payload_systems},
         "input": None if input_path is None else str(input_path),
         "seed": seed,
-        "n_points": payload["n_points"],
+        "n_points": payload_systems[0]["n_points"],
         "n_draws": n_draws,
         "data_out": None if data_out is None else str(data_out),
         "bytes": len(html),
@@ -1321,29 +1316,62 @@ def _demo_pack_payload(
     out_dir: Path,
     input_path: Path | None,
     input_name: str | None,
+    systems: str | None,
+    data_out: Path | None,
+    array_format: ArrayRequest,
     seed: int,
     n_points: int,
     n_draws: int,
     overwrite: bool,
 ) -> dict[str, Any]:
-    """Write an inspectable demo folder: HTML + JSON + static plots."""
+    """Write an inspectable demo folder: HTML + arrays + static plots."""
+    resolved_sources = _resolve_demo_sources(source, systems)
+    if len(resolved_sources) > 1:
+        raise SystemExit("--out-dir writes source-specific arrays/plots; use one demo source")
     if out_dir.exists() and any(out_dir.iterdir()) and not overwrite:
         raise SystemExit(f"{out_dir} is not empty; pass --overwrite to replace files")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     html_path = out_dir / "index.html"
-    data_path = out_dir / "demo_data.json"
     payload = _demo_payload(
         source,
         out=html_path,
         input_path=input_path,
         input_name=input_name,
-        data_out=data_path,
+        systems=systems,
+        data_out=data_out,
         seed=seed,
         n_points=n_points,
         n_draws=n_draws,
         overwrite=overwrite,
     )
+
+    arrays: dict[str, Any] | None = None
+    if array_format != "none":
+        if input_path is None:
+            spec = _demo_source_spec(source)
+            bank = build_dgp_bank(spec, seed=seed, n_noise_draws=n_draws, verbose=False)
+        else:
+            values, feature_names = _load_demo_values(input_path)
+            bank = build_empirical_dgp_bank(
+                values,
+                name=input_name or input_path.stem,
+                noise_seed_base=seed,
+                n_noise_draws=n_draws,
+                feature_names=feature_names,
+            )
+        manifest = export_dgp_bank_files(
+            bank,
+            out_dir / "arrays",
+            array_format=cast(ArrayFormat, array_format),
+            overwrite=overwrite,
+        )
+        arrays = {
+            "array_format": array_format,
+            "dir": str(out_dir / "arrays"),
+            "manifest": str(out_dir / "arrays" / "manifest.json"),
+            "files": manifest["files"],
+        }
 
     plots: dict[str, str] = {}
     if input_path is None:
@@ -1367,7 +1395,8 @@ def _demo_pack_payload(
     return {
         "out_dir": str(out_dir),
         "html": str(html_path),
-        "data": str(data_path),
+        "data": None if data_out is None else str(data_out),
+        "arrays": arrays,
         "plots": plots,
         **payload,
     }
@@ -1379,12 +1408,15 @@ class Demo:
     """Generate an interactive 3D trajectory HTML page with controllable noise."""
 
     source: Annotated[str, cappa.Arg(default="lorenz")]
-    out: Annotated[Path, cappa.Arg(long=True)] = Path("serie_demo.html")
+    out_html: Annotated[
+        Path,
+        cappa.Arg(long=True, help="Output path for one self-contained viewer HTML file."),
+    ] = Path("serie_demo.html")
     out_dir: Annotated[
         Path | None,
         cappa.Arg(
             long=True,
-            help="Optional demo folder containing index.html, demo_data.json, and static plots.",
+            help="Optional demo folder containing index.html, static plots, and array artifacts.",
         ),
     ] = None
     input: Annotated[
@@ -1399,6 +1431,23 @@ class Demo:
         cappa.Arg(long=True, help="Display name for --input data. Defaults to the file stem."),
     ] = None
     data_out: Annotated[Path | None, cappa.Arg(long=True)] = None
+    systems: Annotated[
+        str | None,
+        cappa.Arg(
+            long=True,
+            help=(
+                "Comma-separated built-in demo sources, or a group such as 'shapes'. "
+                "Use with --out-html to bake a dropdown viewer."
+            ),
+        ),
+    ] = None
+    array_format: Annotated[
+        ArrayRequest,
+        cappa.Arg(
+            long=True,
+            help="Array artifacts for --out-dir: none, npy, csv, ipc, parquet, table, or all.",
+        ),
+    ] = "ipc"
     seed: Annotated[int, cappa.Arg(long=True)] = 42
     n_points: Annotated[int, cappa.Arg(long=True)] = 4000
     n_draws: Annotated[int, cappa.Arg(long=True)] = 5
@@ -1408,9 +1457,9 @@ class Demo:
     def __call__(self) -> None:
         if self.out_dir is not None:
             out_dir = self.out_dir
-            if self.out != Path("serie_demo.html"):
+            if self.out_html != Path("serie_demo.html"):
                 raise SystemExit(
-                    "use either --out for one HTML file or --out-dir for a demo folder"
+                    "use either --out-html for one HTML file or --out-dir for a demo folder"
                 )
             _emit_payload(
                 lambda: _demo_pack_payload(
@@ -1418,6 +1467,9 @@ class Demo:
                     out_dir=out_dir,
                     input_path=self.input,
                     input_name=self.input_name,
+                    systems=self.systems,
+                    data_out=self.data_out,
+                    array_format=self.array_format,
                     seed=self.seed,
                     n_points=self.n_points,
                     n_draws=self.n_draws,
@@ -1430,9 +1482,10 @@ class Demo:
         _emit_payload(
             lambda: _demo_payload(
                 self.source,
-                out=self.out,
+                out=self.out_html,
                 input_path=self.input,
                 input_name=self.input_name,
+                systems=self.systems,
                 data_out=self.data_out,
                 seed=self.seed,
                 n_points=self.n_points,
@@ -1458,17 +1511,13 @@ class Version:
 @cappa.command(name="serie")
 @attrs.define
 class Serie:
-    """SERIE: generate, inspect, export, and visualize controlled time-series cells."""
+    """SERIE: generate controlled time-series cells and demos."""
 
     cmd: cappa.Subcommands[
         Commands
         | List
         | DataDir
-        | Inspect
         | Generate
-        | InjectNoise
-        | Export
-        | Plot
         | Walkthrough
         | Demo
         | Version

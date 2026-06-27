@@ -38,7 +38,7 @@ class ODESystem(StrEnum):
     HYPER_ROSSLER = auto()  # 4D hyperchaotic extension of Rössler
     CHUA = auto()  # 3D piecewise-linear double-scroll circuit
     DUFFING = auto()  # 2D driven nonlinear oscillator
-    VAN_DER_POL = auto()  # 2D self-sustained limit cycle
+    VANDERPOL = auto()  # 2D self-sustained limit cycle
     LORENZ96 = auto()  # N-D weather toy model (configurable dim)
 
     # Discrete maps
@@ -490,7 +490,7 @@ def vanderpol_spec(*, mu=2.0, steps=35999, dt=1e-2, burn_in=1000):
     from .specs import TrajectorySpec
 
     return TrajectorySpec(
-        system=ODESystem.VAN_DER_POL,
+        system=ODESystem.VANDERPOL,
         params=VanderPolParams(mu=mu),
         dt=dt,
         steps=steps,
@@ -815,6 +815,27 @@ def slds_spec(*, A1=0.9, Q1=0.05, A2=0.98, Q2=0.35, p11=0.94, p22=0.95, steps=25
         method="euler",  # ← NEW (ignored for discrete; schema compat)
         x0=(0.0,),
     )  # NOTE Note: dt=1.0 is a dummy
+
+
+def slds_moe_spec(*, steps=25000):
+    # MOE-diagnostic preset: regimes are maximally distinct so a regime-aware
+    # model (MOE, HMM-gated, mixture Gaussian) should outperform a single AR.
+    #
+    # Regime 1: A1=0.3 (fast mean-reversion), Q1=0.01 (quiet)
+    # Regime 2: A2=0.99 (near unit root), Q2=1.0 (volatile)
+    # p11=p22=0.95 → dwell ≈ 20 steps per regime
+    #
+    # Estimated oracle-vs-global gap: ~32% (single seed, no error bars).
+    # Full methodology, limitations, and parameter sweep tables:
+    #   see docs/system_presets.md → "SLDS" section
+    from .specs import TrajectorySpec
+    return TrajectorySpec(
+        system=ODESystem.SLDS,
+        params=SLDSParams(A1=0.3, Q1=0.01, A2=0.99, Q2=1.0, p11=0.95, p22=0.95),
+        dt=1.0, steps=steps, burn_in=0, dim=1,
+        method="euler",
+        x0=(0.0,),
+    )
 
 
 def slds_param_shock_spec():
@@ -1154,7 +1175,7 @@ SYSTEMS: dict[str, SystemSpec] = {
         f_py=_f_duffing,
     ),
     "vanderpol": SystemSpec(
-        name="van_der_pol",
+        name="vanderpol",
         dim=2,
         param_type=VanderPolParams,
         kind="ode",
@@ -1218,20 +1239,35 @@ DISCRETE_SYSTEMS = {"slds", "seasonal_ar", "garch"}
 _ALL_PRESETS = {
     "lorenz": lorenz_spec,
     "lorenz_param_shock": lorenz_param_shock_spec,
+    "lorenz_state_shock": lorenz_state_shock_spec,
+    "lorenz_switch": lorenz_switch_spec,
     "rossler": rossler_spec,
+    "rossler_param_shock": rossler_param_shock_spec,
     "hyper_rossler": hyper_rossler_spec,
     "chua": chua_spec,
+    "chua_param_shock": chua_param_shock_spec,
+    "chua_switch": chua_switch_spec,
     "duffing": duffing_spec,
     "vanderpol": vanderpol_spec,
     "lorenz96": lorenz96_spec,
+    "lorenz96_switch": lorenz96_switch_spec,
     "henon": henon_spec,
     "logistic": logistic_spec,
     "ou": ou_spec,
+    "ou_param_shock": ou_param_shock_spec,
     "doublewell": doublewell_spec,
+    "doublewell_param_shock": doublewell_param_shock_spec,
+    "doublewell_switch": doublewell_switch_spec,
     "slds": slds_spec,
+    "slds_moe": slds_moe_spec,
+    "slds_param_shock": slds_param_shock_spec,
+    "slds_switch": slds_switch_spec,
     "seasonal_ar": seasonal_ar_spec,
+    "seasonal_ar_param_shock": seasonal_ar_param_shock_spec,
     "garch": garch_spec,
+    "garch_param_shock": garch_param_shock_spec,
     "ks": ks_spec,
+    "ks_param_shock": ks_param_shock_spec,
     "diagonal": diagonal_spec,
 }
 

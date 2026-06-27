@@ -9,12 +9,12 @@ maintainer and release notes live outside this package repo in
 
 SERIE builds time-series robustness test data. It starts from a clean source,
 optionally applies an intervention, injects observation noise, and returns
-train/validation/test split metadata or files.
+the JSON DGP-bank summary, train/validation/test split summary, or files.
 
 The shell-first workflow is:
 
 ```text
-source + optional shock + sigma -> serie generate -> split metadata/files
+source + optional shock + sigma -> serie generate -> JSON summary/files
 ```
 
 For Python code, the underlying primitives are `build_dgp_bank(...)` and
@@ -26,28 +26,29 @@ For Python code, the underlying primitives are `build_dgp_bank(...)` and
 Start by discovering the available surface:
 
 ```bash
-serie commands
-serie list
+serie list-cli-commands
+serie list-data-ids
 serie generate --help
 ```
 
-Use `--format json` when another program or agent needs to parse the output.
+`generate` always prints JSON. Use `--format json` on discovery, demo, or
+walkthrough commands when another program or agent needs to parse their output.
 
 ```bash
-serie commands --format json
-serie list --format json
+serie list-cli-commands --format json
+serie list-data-ids --format json
 ```
 
 ## Generate One Cell
 
 `generate` is the command most agents should use. It resolves the source,
 applies a built-in shock preset if requested, injects noise, splits the series,
-and prints or writes the result.
+and prints a JSON DGP-bank summary plus split summary.
 
 ```bash
-serie generate lorenz --sigma 0.1 --format json
-serie generate lorenz --shock param --sigma 0.1 --format json
-serie generate ou --sigma 1.0 --sigma-scale train_std --format json
+serie generate lorenz --sigma 0.1
+serie generate lorenz --shock param --sigma 0.1
+serie generate ou --sigma 1.0 --sigma-scale train_std
 ```
 
 Useful options:
@@ -56,17 +57,15 @@ Useful options:
 - `--sigma`: observation-noise dose.
 - `--sigma-scale unit|train_std`: raw unit noise or train-std-scaled noise.
 - `--partition`: split convention, such as `p70_20_10`.
-- `--out`: write artifacts to a directory.
+- `--out`: write artifacts under a stable `<source>_<cell-hash>` child directory.
 - `--array-format none|npy|csv|ipc|parquet|table|all`: choose array outputs.
 - `--plot none|timeseries|attractor|both`: choose figure outputs.
-- `--overwrite`: replace an existing output directory.
 
 Example with files:
 
 ```bash
 serie generate lorenz --shock param --sigma 0.1 \
-  --out tmp/lorenz_cell --array-format all --plot both \
-  --overwrite --format json
+  --out tmp/lorenz_cell --array-format all --plot both
 ```
 
 ## Inspect And Visualize
@@ -74,17 +73,18 @@ serie generate lorenz --shock param --sigma 0.1 \
 Use these for quick checks:
 
 ```bash
-serie inspect lorenz --format json
-serie data-dir --format json
-serie demo lorenz --out tmp/lorenz_demo.html --overwrite
+serie show-data-dir --format json
+serie generate lorenz
+serie demo lorenz --out-html tmp/lorenz_demo.html --overwrite
 serie demo henon --out-dir tmp/henon_demo_pack --overwrite --format json
 serie walkthrough --out tmp/walkthrough --overwrite --format json
 ```
 
 `demo` writes a self-contained HTML file for `lorenz`, `rossler`, `chua`,
 `vanderpol`, `henon`, or `logistic`.
-Use `demo --out-dir` when a folder with HTML, viewer JSON, and static PNG plots
-is more useful than one shareable HTML file.
+Use `demo --out-dir` when a folder with HTML, IPC arrays, and static PNG plots
+is more useful than one shareable HTML file. Add `--data-out` only when a
+separate browser JSON payload is needed for inspection.
 `walkthrough` writes a fuller audit with arrays, manifests, and figures.
 
 ## Concepts To Preserve
@@ -105,7 +105,10 @@ may still contain them.
 Keep changes scoped to the public data layer. Do not move Fern trainer,
 dashboard, run-result, or checkpoint concepts back into SERIE.
 
-Use `just ci-check` before handing work back. It runs Ruff, Pyright, and pytest.
+Use `just check` before handing work back. It runs Ruff, Pyright, pytest with
+coverage, builds the wheel, installs that wheel in a clean temp venv, and
+smoke-tests the installed CLI. `just publish-release` runs this same check
+before uploading to PyPI.
 
 For browser-template work, use `just dev-demo-template` to rebuild
 `demo_dist/`, then `just dev-demo-inspect` to write ignored inspection HTML/JSON

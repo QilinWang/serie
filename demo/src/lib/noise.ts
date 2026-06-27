@@ -8,8 +8,18 @@ export type DemoData = {
   feature_names: string[];
   dt: number;
   n_points: number;
+  shape?: {
+    clean: [number, number];
+    draws: [number, number, number];
+  };
   clean: Point3[];
   draws: Point3[][];
+};
+
+export type DemoBundle = {
+  kind?: "serie_demo_bundle";
+  default_system?: string;
+  systems: DemoData[];
 };
 
 export type Bounds = {

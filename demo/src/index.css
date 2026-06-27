@@ -33,6 +33,7 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }

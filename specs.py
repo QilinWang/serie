@@ -49,7 +49,7 @@ _ODE_METHOD_SYSTEMS = frozenset(
         ODESystem.HYPER_ROSSLER,
         ODESystem.CHUA,
         ODESystem.DUFFING,
-        ODESystem.VAN_DER_POL,
+        ODESystem.VANDERPOL,
         ODESystem.LORENZ96,
         ODESystem.DIAGONAL,
     }
@@ -313,6 +313,12 @@ class TrajectorySpec:
         from .catalog import slds_spec
 
         return slds_spec(**kw)
+
+    @classmethod
+    def slds_moe(cls, **kw) -> "TrajectorySpec":
+        """SLDS with maximally distinct regimes — MOE diagnostic. SLDS最大化体制差异——MOE诊断用。"""
+        from .catalog import slds_moe_spec
+        return slds_moe_spec(**kw)
 
     @classmethod
     def slds_param_shock(cls) -> "TrajectorySpec":

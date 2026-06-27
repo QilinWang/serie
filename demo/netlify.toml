@@ -1,3 +1,6 @@
 [build]
-command = "bun run build"
+# Build the standalone React/Vite demo from source.
+# `bun run bake` first writes public/attractor_data.json from the SERIE Python API;
+# without it the deployed page is only the viewer shell.
+command = "python -m pip install uv && bun run bake && bun run build"
 publish = "dist"

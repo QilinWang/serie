@@ -7,6 +7,17 @@ know what was tested and what breaks.
 
 DGP = Data Generating Process (数据生成过程).
 
+## Methodology note
+
+Stability checks ("Verified: all finite") were done by running standalone
+Python simulations and checking `np.all(np.isfinite(...))` on the output.
+Quantitative gap measurements (SLDS section) used standalone simulations with
+a single seed (seed=42) — they are **point estimates without error bars**.
+None of these numbers have been validated through `serie`'s actual pipeline
+(`build_dgp_bank` → `inject_noise`). The qualitative conclusions (which
+presets are stable, which regime configurations have large gaps) are likely
+correct, but specific percentages should be treated as approximate.
+
 ## Quick Reference
 
 | Preset name | Dim | Steps | dt | T (s) | Category | Bounded? |
@@ -166,6 +177,126 @@ Noise-induced transitions between wells. Bounded by the quartic potential.
 ### SLDS (1D discrete)
 
 2-regime Markov-switching AR(1). Bounded when \|A₁\|,\|A₂\| < 1.
+
+SLDS 是一个切换线性动态系统。在每个时间步，一个隐藏的马尔可夫链选择两个
+AR(1) 中的哪一个生成下一个观测值。参数 p11/p22 控制停留概率（在当前状态下
+停留的概率），决定了平均停留时间 dwell = 1/(1-p)。
+
+The data generation process at each step:
+```
+regime[t] ~ Markov(transition_matrix)     # hidden state picks which AR
+x[t+1]   = A[regime[t]] * x[t]           # autoregressive coefficient for that regime
+         + sqrt(Q[regime[t]]) * noise[t]  # noise variance for that regime
+```
+
+**Default preset** (`slds`): A1=0.9, Q1=0.05, A2=0.98, Q2=0.35, p11=0.94,
+p22=0.95 (dwell ≈ 17/20 steps). The two regimes are close enough that a
+single AR(1) model captures 98% of the variance — the oracle-vs-global MSE
+gap is only 1.7%. This preset tests basic stochastic forecasting, not
+regime detection.
+
+**MOE preset** (`slds_moe`): A1=0.3, Q1=0.01, A2=0.99, Q2=1.0, p11=0.95,
+p22=0.95. The two regimes are maximally distinct:
+- Regime 1 (A=0.3, Q=0.01): fast mean-reversion, quiet — signal decays
+  quickly, low noise, so this regime produces small, stable values.
+- Regime 2 (A=0.99, Q=1.0): near-unit-root, volatile — signal barely
+  decays, high noise, so this regime produces large, wandering values.
+
+#### Measurement methodology
+
+The "oracle-vs-global gap" measures how much a model gains from knowing the
+true regime at each timestep. This quantifies the *value of regime detection*
+for the SLDS preset.
+
+**How the gap is computed:**
+
+1. Generate a trajectory of N=25000 steps from the SLDS with known regime
+   labels (the hidden Markov chain is part of the simulation, so ground-truth
+   labels are available).
+
+2. **Global model**: fit a single AR(1) coefficient `a_global` and variance
+   `q_global` to the entire sequence, ignoring regime labels. One-step-ahead
+   prediction: `x̂[t+1] = a_global * x[t]`. Compute MSE over all steps.
+
+3. **Oracle model**: fit separate AR(1) coefficients `a_1, a_2` and variances
+   `q_1, q_2` to the steps belonging to each regime (using ground-truth
+   labels). One-step-ahead prediction: `x̂[t+1] = a[regime[t]] * x[t]`.
+   Compute MSE over all steps.
+
+4. **Gap** = `1 - oracle_mse / global_mse`. A gap of 32% means the oracle
+   has 32% lower MSE than the global model.
+
+**What the oracle represents:** The oracle is NOT a realistic model — no
+real forecaster has access to ground-truth regime labels. It is an upper
+bound on how much regime-aware modeling (MOE, HMM, gating network) could
+help. If the oracle gap is 2%, there is no point building a regime-detection
+model. If it is 32%, there is substantial room for a regime-aware model to
+improve over a single-regime baseline.
+
+实际中没有模型能达到 oracle 的性能，因为真实模型必须从观测值推断状态，
+不可能完美。oracle gap 是一个上界，回答的问题是"值不值得做状态检测"。
+
+**Limitations of these numbers:**
+
+- **Single seed, no error bars.** Each gap percentage is a point estimate
+  from one run of 25000 steps with seed=42. No variance across seeds was
+  computed. The true gap could differ by ±3-5 percentage points.
+- **One-step-ahead only.** The gap is measured at prediction horizon h=1.
+  At longer horizons, the gap could be larger (regime identity matters more
+  for multi-step forecasts) or smaller (both models revert toward the
+  stationary mean).
+- **Standalone simulation.** The numbers were computed from a standalone
+  Python SLDS simulation, not validated through `serie`'s actual integrator
+  pipeline (`build_dgp_bank` → `inject_noise`). The integrator should
+  produce equivalent results, but this has not been verified.
+- **Fitted AR(1) only.** The global model is a simple linear fit. A more
+  flexible single-regime model (e.g., RNN, transformer) might narrow the
+  gap without explicit regime detection.
+
+#### Table 1: Gap vs switching speed
+
+Fixed regimes (A1=0.3, Q1=0.01, A2=0.99, Q2=1.0), varying transition
+probability p (where p11=p22=p):
+
+| p (p11=p22) | Dwell (steps) | Gap | Interpretation |
+|-------------|--------------|-----|----------------|
+| 0.5 | 2 | ~19% | Switching every ~2 steps. Too fast to detect — by the time you identify regime 1, you're already in regime 2. The process looks like a single noisy mixture. |
+| 0.8 | 5 | ~29% | Moderate switching. Some regime structure is visible but hard to exploit in real-time. |
+| 0.9 | 10 | ~31% | Regimes last ~10 steps. Enough to detect and adapt, but the model has limited data per regime stretch. |
+| **0.95** | **20** | **~32%** | **Chosen for preset.** Each regime lasts ~20 steps — long enough that a gating network or HMM can detect the switch and adapt within a few steps, short enough that a single AR(1) cannot locally track the dynamics. |
+| 0.99 | 100 | ~19% | Regimes last ~100 steps. A single adaptive model (or one with long context) can effectively track the local dynamics without needing explicit regime detection — it has time to "settle in." |
+| 0.995 | 200 | ~15% | Very slow switching. Each stretch is so long that even a simple model adapts. The switching itself is rare enough to be a minor perturbation. |
+
+注意：所有百分比都是单次运行的点估计值（seed=42，N=25000），未报告置信区间。
+真实值可能有 ±3-5 个百分点的偏差。
+
+**Pattern:** the gap peaks at intermediate dwell times. Too fast → mixture
+noise hides the structure. Too slow → a single model can locally adapt.
+The sweet spot is where regime structure is learnable but not trivially
+trackable.
+
+#### Table 2: Gap vs regime separation
+
+Fixed switching speed (p11=p22=0.95, dwell≈20), varying how different the
+two regimes are:
+
+| A1 | Q1 | A2 | Q2 | Gap | Interpretation |
+|----|-----|-----|-----|-----|----------------|
+| 0.9 | 0.05 | 0.98 | 0.35 | ~2% | **Default preset.** Both regimes are slow-decaying and quiet. A single AR(1) with a≈0.94 fits both almost equally well. No regime detection needed. |
+| 0.5 | 0.05 | 0.98 | 0.35 | ~18% | Regime 1 now decays faster (A=0.5 vs 0.9), creating a moderate gap. |
+| 0.3 | 0.01 | 0.99 | 1.0 | ~32% | **MOE preset.** Regime 1 is fast/quiet (A=0.3, Q=0.01), regime 2 is slow/loud (A=0.99, Q=1.0). A single AR(1) must compromise between two very different dynamics. |
+| 0.0 | 0.01 | 0.99 | 2.0 | ~47% | Maximally distinct: regime 1 is iid noise (A=0), regime 2 is near-random-walk with high variance. Not chosen for preset because A1=0.0 makes regime 1 degenerate (no temporal structure to learn). |
+
+**Why A1=0.3, not 0.0:** At A1=0.0, regime 1 is just iid white noise — there
+is no autoregressive structure for a model to learn. At A1=0.3, regime 1 is
+still a recognizable mean-reverting process with short memory (≈3 steps to
+decay to 3% of initial value). This makes regime 1 a meaningful forecasting
+target, not just noise.
+
+**Why Q2=1.0, not 2.0:** Q2=2.0 produces a 47% gap but regime 2 dominates
+the signal variance so heavily that the task becomes "detect high-variance
+periods" rather than "detect regime-specific dynamics." Q2=1.0 keeps the
+two regimes distinguishable without trivializing the detection problem.
 
 ### Seasonal AR (1D discrete)
 

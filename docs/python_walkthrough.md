@@ -8,16 +8,16 @@ paths still compose.
 For the visual first impression, use the CLI demo instead:
 
 ```bash
-serie demo lorenz --out tmp/lorenz_demo.html
-serie demo rossler --out tmp/rossler_demo.html
-serie demo chua --out tmp/chua_demo.html
+serie demo lorenz --out-html tmp/lorenz_demo.html
+serie demo rossler --out-html tmp/rossler_demo.html
+serie demo chua --out-html tmp/chua_demo.html
 ```
 
 For the main data workflow, use `generate`:
 
 ```bash
-serie generate lorenz --sigma 0.1 --format json
-serie generate lorenz --shock param --sigma 0.1 --format json
+serie generate lorenz --sigma 0.1
+serie generate lorenz --shock param --sigma 0.1
 ```
 
 The Python API explains what those commands compose internally.
@@ -133,8 +133,8 @@ shifted_noisy = inject_noise(shifted_bank, sigma=0.25)
 CLI equivalents:
 
 ```bash
-serie generate lorenz --sigma 0.25 --format json
-serie generate lorenz --shock param --sigma 0.25 --format json
+serie generate lorenz --sigma 0.25
+serie generate lorenz --shock param --sigma 0.25
 ```
 
 ## Stochastic Draw Pairing

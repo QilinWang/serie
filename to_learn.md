@@ -4,6 +4,317 @@
 
 ---
 
+## Part 0: 当前深度待办与部署练习
+
+这一段是给现在的项目节奏用的：先把 **SERIE 包本身**、**浏览器演示页**、
+**发布流程** 三件事分清楚，再练部署。
+
+### 当前状态板
+
+| 事项 | 当前状态 | 下一步 |
+|------|----------|--------|
+| PyPI 包 | `serie` 已经可以构建 wheel/sdist，`just check` 会做本地完整检查 | 发布新版本前改版本号，跑 `just check`，再 `just publish-release` 或 GitHub Trusted Publishing |
+| GitHub CI | `.github/workflows/ci.yml` 已经跑 ruff、pyright、pytest、wheel 检查 | push 后在 GitHub Actions 页看是否全绿 |
+| GitHub Pages demo | `.github/workflows/pages-demo.yml` 已经生成一个离线 `serie demo shapes` HTML 并发布 | GitHub 仓库 Settings → Pages → Source 选 **GitHub Actions**，然后 push 或手动 Run workflow |
+| Netlify demo | `demo/netlify.toml` 是 Vite/React 演示源码的部署入口 | 作为前端部署练习：让 Netlify 从 `demo/` 构建，或者只上传本地生成的静态 HTML |
+| 腾讯云 demo | 最适合练“静态文件托管” | 跑 `just build-demo-static` 生成 `tmp/deploy_site/index.html`，上传到 COS 静态网站 bucket，object key 用 `index.html` |
+| README / 教程 | README 面向用户，`to_learn.md` 面向你学习维护 | 不把 shell 魔法塞进 README；把概念解释留在这里 |
+
+### 三种“demo”不要混在一起
+
+SERIE 现在有三种相关但不同的东西：
+
+```text
+1. serie demo --out-html
+   Python CLI 生成一个自包含 HTML 文件。最适合分享、GitHub Pages、腾讯 COS。
+   本仓库的快捷命令是 just build-demo-static，默认写到 tmp/deploy_site/index.html。
+   `serie demo shapes` 会把 Lorenz、Rössler、Chua 打进同一个 HTML，并在浏览器里给一个下拉菜单。
+
+2. serie demo --out-dir
+   Python CLI 生成一个检查文件夹：index.html + arrays/ + static plots。
+   适合你检查数据，不适合作为默认发布网页。
+
+3. serie/demo/
+   React + Three.js + Vite 源码。它是前端练习场；需要 Bun/Node 工具链。
+   PyPI wheel 不发布这个源码，只发布预构建的 demo_dist 模板。
+```
+
+### Astro project page 可以放在哪里
+
+Astro 适合做 SERIE 的 **项目主页 / 文档型展示站**，但不应该替代现有的
+`serie demo` 或 `serie/demo/`：
+
+```text
+serie demo --out-html     -> 生成一个可直接托管的交互式 demo HTML
+serie/demo/               -> React + Three.js + Vite viewer 源码
+Astro project page        -> 把 README、CLI 说明、研究动机、demo 链接组织成网站
+```
+
+心智模型：
+
+```text
+Astro 负责页面和内容结构：
+  src/pages/index.astro       首页
+  src/pages/demo.astro        demo 入口页
+  src/pages/cli.astro         CLI 示例和 JSON summary 说明
+  src/pages/deploy.astro      GitHub Pages / Netlify / 腾讯 COS 说明
+  src/pages/research.astro    DGP bank、titration、exact benchmark 叙事
+
+现有 SERIE demo 负责交互体验：
+  just build-demo-static      生成 tmp/deploy_site/index.html
+  serie demo shapes ...       生成可嵌入或链接的 attractor viewer
+```
+
+为什么不是只用 Vite/React？
+
+```text
+Vite/React 更适合做一个重交互应用。
+Astro 更适合做多页面项目站：静态页面、Markdown/MDX 内容、少量交互岛。
+SERIE 项目页主要是解释和导航，只有 demo 区域需要强交互，所以 Astro 更顺手。
+```
+
+最小目录建议：
+
+```text
+site/
+  package.json
+  astro.config.mjs
+  src/
+    pages/
+      index.astro
+      demo.astro
+      cli.astro
+      deploy.astro
+      research.astro
+  public/
+    demo/
+      index.html   # 可由 serie demo shapes --out-html 生成或复制进来
+```
+
+第一版不要做复杂集成。先把现有 demo 当静态资产放进 Astro：
+
+```bash
+just build-demo-static
+mkdir -p site/public/demo
+cp tmp/deploy_site/index.html site/public/demo/index.html
+```
+
+然后 `site/src/pages/demo.astro` 里先用链接或 iframe 指向 `/demo/index.html`。
+等页面结构跑通后，再考虑把 `serie/demo/` 的 React viewer 抽成 Astro React island。
+
+推荐 Justfile 名字：
+
+```text
+dev-project-page       # 本地启动 Astro dev server
+build-project-page     # 构建 site/dist
+check-project-page     # 构建并检查输出
+```
+
+部署心智模型：
+
+```text
+GitHub Pages / Netlify 发布 site/dist
+腾讯 COS 仍然优先练 just build-demo-static 生成的单文件 index.html
+```
+
+官方文档入口：
+
+```text
+Astro project structure: https://docs.astro.build/en/basics/project-structure/
+Astro React integration: https://docs.astro.build/en/guides/integrations-guide/react/
+Astro on GitHub Pages:   https://docs.astro.build/en/guides/deploy/github/
+Astro on Netlify:        https://docs.astro.build/en/guides/deploy/netlify/
+```
+
+### GitHub Pages 练习
+
+这个已经是仓库里最标准的“自动部署”练习。你不需要选 GitHub 提供的
+Jekyll / Static HTML 模板，因为仓库已经有自己的 workflow：
+
+```text
+.github/workflows/pages-demo.yml
+```
+
+操作顺序：
+
+```bash
+git add ...
+git commit -m "..."
+git push
+```
+
+然后在 GitHub 页面：
+
+```text
+Settings → Pages → Build and deployment → Source → GitHub Actions
+Actions → Pages Demo → 等它跑完
+```
+
+这个 workflow 做的事是：
+
+```text
+checkout 代码
+安装 uv
+安装 Python 3.14
+运行 serie demo shapes --out-html site/index.html
+把 site/ 上传给 GitHub Pages
+```
+
+心智模型：**GitHub Pages 不是在跑 Python 服务。** 它只是托管最后生成出来的
+静态 HTML 文件。
+
+### Netlify 练习
+
+Netlify 可以做两种不同练习：
+
+#### A. 前端源码练习（推荐给你学 Vite/React）
+
+把 Netlify 的 base directory 设成：
+
+```text
+demo
+```
+
+构建命令（`demo/netlify.toml` 已经写好）：
+
+```bash
+python -m pip install uv && bun run bake && bun run build
+```
+
+发布目录：
+
+```text
+dist
+```
+
+这条路会让 Netlify 构建 `serie/demo/` 这个 React/Vite 项目。它更适合学习：
+
+```text
+package.json
+bun install
+vite build
+dist/
+netlify.toml
+```
+
+注意：`python -m pip install uv` 是为了让 Netlify 的干净构建机能运行
+SERIE 的 Python bake 步骤。`bun run bake` 会先用 SERIE Python API 生成浏览器需要的
+`public/attractor_data.json`。如果只跑 `bun run build`，页面可能能打开，
+但没有真实数据，只会显示“请先 bake JSON”的提示。
+
+Netlify 官方文档里，`netlify.toml` 的 `[build]` 可以指定 `command` 和
+`publish`；如果配置冲突，`netlify.toml` 会覆盖 UI 里的同名设置：
+https://docs.netlify.com/build/configure-builds/file-based-configuration/
+
+Netlify 也能自动识别 Bun 项目；如果 base directory 里是 Bun 项目
+（例如有 `bun.lock` / `bun.lockb` 这样的 Bun lockfile），它会用 Bun 安装依赖：
+https://docs.netlify.com/build/configure-builds/manage-dependencies/#bun
+
+本机练习时要注意一个坑：`bunx netlify status` 这次在你的 WSL 里失败了，
+因为 Netlify CLI 触发了 Node 专有的 compile-cache 路径，而 Bun 的兼容层没有完全覆盖。
+同时你的 `/usr/local/bin/node` 实际上是指向 Bun 的 symlink，不是真正的 Node：
+
+```text
+/usr/local/bin/node -> /home/qilin/.bun/bin/bun
+```
+
+这解释了为什么 `npx netlify status` 找不到，`bunx netlify status` 又崩。
+结论：
+
+```text
+前端项目构建：Bun 可以继续用。
+Netlify CLI：最好安装真正的 Node/npm/npx 后再用。
+不用 CLI 的练习：直接在 Netlify 网页 UI 上传 site/ 或连接 GitHub，也完全可以。
+```
+
+#### B. 静态 HTML 练习（推荐给 SERIE 用户）
+
+本地或 CI 先生成：
+
+```bash
+just build-demo-static
+```
+
+然后 Netlify 只发布：
+
+```text
+tmp/deploy_site/
+```
+
+这条路更像 GitHub Pages：不教太多前端构建，但最接近“研究者想看一个
+SERIE demo 文件”的真实需求。当前 `shapes` 组是三种原生 3D 形状系统：
+
+```text
+lorenz
+rossler
+chua
+```
+
+随机系统里目前没有原生 3D 源。OU、doublewell、SLDS、seasonal_ar 是 1D；
+GARCH 是 2D，可以被补一个 z=0 通道放进 3D viewer，但它不是原生 3D attractor。
+
+### 腾讯云 COS 静态网站练习
+
+腾讯云 COS 最适合练“对象存储 + 静态网站”。它不需要运行 Python、
+Node、Bun、Vite。你上传的是已经生成好的静态文件。
+
+本地先做：
+
+```bash
+just build-demo-static
+```
+
+然后在腾讯云控制台：
+
+```text
+COS → Bucket 列表 → 创建 bucket
+权限：public-read / private-write（公开读，私有写）
+基础配置 → 静态网站 → 开启
+索引文档：index.html
+上传 tmp/deploy_site/index.html，object key 写成 index.html
+访问静态网站地址或绑定自定义域名
+```
+
+这个命令和 `just build-dist-release` 没有关系：
+
+```text
+just build-demo-static  -> 生成给网页托管用的 tmp/deploy_site/index.html
+just build-dist-release -> 生成给 PyPI 上传用的 dist/*.whl 和 dist/*.tar.gz
+```
+
+腾讯云官方 COS 静态网站文档：
+https://www.tencentcloud.com/document/product/436/30958
+
+中文文档：
+https://cloud.tencent.com/document/product/436/32670
+
+注意两个现实问题：
+
+```text
+1. 新 bucket 可能要求自定义域名才能正常网页预览；
+2. 如果用中国大陆自定义域名，通常会涉及 ICP 备案。
+```
+
+所以第一次练习时，目标不是“完美正式上线”，而是：
+
+```text
+我能把 SERIE 生成的 index.html 作为静态网页放到一个云 bucket 上。
+```
+
+### 更深的项目待办
+
+| 优先级 | 待办 | 原因 |
+|--------|------|------|
+| 高 | push 当前 SERIE 改动，让 CI / Pages 真跑一次 | 本地通过不等于云端通过 |
+| 高 | 新版本发布前跑 `just check`，再确认 wheel 内容 | PyPI 文件不可覆盖，发布前要一次过 |
+| 中 | Netlify 先走 `demo/` 源码路径 | 这是学习前端构建链最好的练习 |
+| 中 | 腾讯 COS 先手动上传 `tmp/deploy_site/index.html` | 学静态托管，不把云密钥放进 repo |
+| 中 | README 徽章确认都指向正确 workflow | 让项目入口显得正式，也能快速看到状态 |
+| 后 | Netlify / 腾讯自动化上传 | 需要 token/secret；等手动流程跑通再自动化 |
+| 后 | Cloudflare / EdgeOne 对比 | 真要中国访问速度，再评估 CDN/域名/备案 |
+
+---
+
 ## Part 1: 你已有的 GitHub Actions 逐行解读
 
 ### 什么是 GitHub Actions？
@@ -23,6 +334,77 @@ GitHub Actions 是 GitHub 内置的自动化系统。你在仓库里放一个 `.
 
 你可以把它想成：**"每次我 push 代码，GitHub 帮我开一台干净的 Linux 机器，
 装好环境，跑测试，然后告诉我过没过。"**
+
+---
+
+### 本地 check、pre-commit、CI、publish 到底是什么关系？
+
+这四个东西经常被混在一起，但它们其实是不同时间点的门禁：
+
+| 名字 | 在哪里跑 | 什么时候跑 | 目的 |
+|------|----------|------------|------|
+| `just check` | 你的本机 | 你手动运行 | 最完整的本地检查：lint、type、coverage tests、wheel build、clean install smoke test |
+| pre-commit hook | 你的本机 | `git commit` 前自动跑 | 提前挡住明显坏提交，通常只跑快检查 |
+| GitHub Actions CI | GitHub 云端机器 | push / PR 后自动跑 | 在干净环境复现检查，证明"不是只在我电脑上能过" |
+| `just publish-release` | 你的本机 | 你决定发布时手动跑 | 先跑完整检查，再把 wheel/sdist 上传 PyPI |
+
+#### pre-commit hook 是什么？
+
+Git 有一个机制叫 **hook**：在某些 Git 动作前后自动执行脚本。
+`pre-commit` 就是 `git commit` 之前的 hook。
+
+如果安装了 hook，你输入：
+
+```bash
+git commit -m "..."
+```
+
+Git 会先自动跑配置好的检查。检查失败，commit 就不会生成。
+
+SERIE 现在的 `.pre-commit-config.yaml` 只配置了两个快检查：
+
+```text
+Ruff lint
+Pyright
+```
+
+它不跑 pytest，因为测试更慢。完整检查仍然是：
+
+```bash
+just check
+```
+
+所以最简单的心智模型是：
+
+```text
+日常手动确认：just check
+GitHub 自动确认：Actions / CI
+可选本地自动挡板：pre-commit hook
+发布上传：just publish-release
+```
+
+#### 为什么 Justfile 里可以有组合命令？
+
+Justfile 有两种有价值的层次：
+
+```text
+大命令：你真正记住和运行的命令
+小原语：被大命令复用的步骤
+```
+
+例如 `just check` 是大命令；它内部可以调用 `check-source`、`check-wheel`
+这样的可见小步骤去 "build wheel → clean install → run installed CLI"。
+这种组合是好的，因为：
+
+```text
+1. 你只记住一个入口；
+2. 重复步骤有名字，维护时不复制粘贴；
+3. `just --list` 能看到层级关系，学习时不会觉得有神秘步骤；
+4. 但旧概念不能靠"隐藏"继续活着。
+```
+
+规则：如果一个 helper 没有复用价值，应该 inline/delete；如果有复用价值，
+应该在 `just --list` 的注释里说清楚它属于哪个大命令、为什么存在。
 
 ---
 
@@ -76,10 +458,10 @@ jobs:
 
       # 步骤 1：把代码从 GitHub 拉到虚拟机上
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         # "uses" = 调用别人写好的 Action（一个可复用的脚本包）
         # actions/checkout 是 GitHub 官方的，几乎每个工作流都用
-        # @v4 = 用第 4 个大版本
+        # @v7 = 用第 7 个大版本；新项目优先用当前稳定大版本
 
       # 步骤 2：安装 uv（Python 包管理器，比 pip 快很多）
       - name: Install uv
@@ -109,9 +491,16 @@ jobs:
 
       # 步骤 6：运行 Pytest（单元测试）
       - name: Pytest
+        if: matrix.python-version != '3.14'
         run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q
-        # 这就是你本地跑的 pytest，但现在在 GitHub 的云端机器上跑
-        # 如果任何测试失败，整个 CI 会标红
+        # 3.12 是兼容性测试：证明旧一些的 Python 也能跑。
+
+      # 步骤 7：在主力 Python 版本上跑测试并输出覆盖率
+      - name: Pytest with coverage
+        if: matrix.python-version == '3.14'
+        run: uv run --python ${{ matrix.python-version }} --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q --cov --cov-report=term-missing --cov-report=xml
+        # 3.14 是主力测试线：同样跑 pytest，但额外生成 coverage.xml。
+        # 如果任何测试失败，整个 CI 会标红。
 
   # ── 作业 2：构建 wheel 并检查内容 ──────────────────────
   build-wheel:
@@ -121,7 +510,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -129,7 +518,7 @@ jobs:
           enable-cache: true
 
       - name: Install Python
-        run: uv python install 3.12
+        run: uv python install 3.14
 
       # 构建 wheel（.whl 文件）= pip install 时实际安装的包文件
       - name: Build distributions
@@ -158,8 +547,8 @@ jobs:
 GitHub 检测到 push 事件，读取 .github/workflows/ci.yml
         │
         ├──▶ 作业 1: lint-type-test (Python 3.12)  ──▶ checkout → uv → ruff → pyright → pytest
-        ├──▶ 作业 1: lint-type-test (Python 3.14)  ──▶ checkout → uv → ruff → pyright → pytest
-        └──▶ 作业 2: build-wheel                    ──▶ checkout → uv → build → inspect
+        ├──▶ 作业 1: lint-type-test (Python 3.14)  ──▶ checkout → uv → ruff → pyright → pytest + coverage
+        └──▶ 作业 2: build-wheel                    ──▶ checkout → uv → build → inspect wheel contents
         │
         ▼
 全部绿色 ✅ = 代码没问题
@@ -207,7 +596,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -215,14 +604,14 @@ jobs:
           enable-cache: true
 
       - name: Install Python
-        run: uv python install 3.12
+        run: uv python install 3.14
 
       # 发布前再跑一遍完整检查（防止 tag 打在有问题的 commit 上）
       - name: Run release checks
         run: |
-          uv run --python 3.12 --no-project --with-editable ".[dev,diagnostics]" ruff check .
-          uv run --python 3.12 --no-project --with-editable ".[dev,diagnostics]" pyright
-          uv run --python 3.12 --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q
+          uv run --python 3.14 --no-project --with-editable ".[dev,diagnostics]" ruff check .
+          uv run --python 3.14 --no-project --with-editable ".[dev,diagnostics]" pyright
+          uv run --python 3.14 --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q
 
       # 构建 wheel
       - name: Build distributions
@@ -314,7 +703,7 @@ to_learn.md                     # 本地学习版，详细解释，不上传
 
 | 技能 | 做什么 | 简历写法 |
 |------|--------|---------|
-| **GitHub Pages 演示站** | CI 里 `serie demo lorenz` 生成 HTML，推到 gh-pages 分支 | "通过 GitHub Pages CI 流水线发布交互式研究演示" |
+| **GitHub Pages 演示站** | CI 里 `serie demo lorenz` 生成 HTML，上传为 Pages artifact | "通过 GitHub Pages CI 流水线发布交互式研究演示" |
 | **Pre-commit hooks** | ruff + pyright 在 commit 前本地跑，不用等 CI | "配置了 pre-commit 代码质量门禁" |
 | **徽章（badges）** | README 里加 CI 状态、PyPI 版本、下载量徽章 | 视觉上让项目看起来"正式" |
 
@@ -415,7 +804,7 @@ python -m pytest tests -q 2>&1 | lines | where ($it | str contains "FAILED")
 
 # 批量跑多个 sigma
 [0.0 0.1 0.25 0.5 1.0] | each { |s|
-    serie generate lorenz --sigma $s --format json | from json | select sigma train_shape
+    serie generate lorenz --sigma $s | from json | select sigma train_shape
 }
 # 返回一个表格，每行是一个 sigma 的结果
 
@@ -474,7 +863,7 @@ expression: ${{ ... }}     # GitHub Actions 表达式（变量替换）
 | Workflow | 工作流：一个 .yml 文件定义的自动化流程 |
 | Job | 作业：工作流里的一个独立任务，跑在自己的虚拟机上 |
 | Step | 步骤：作业里按顺序执行的一条命令或动作 |
-| Action | 动作：别人写好的可复用脚本（`uses: actions/checkout@v4`） |
+| Action | 动作：别人写好的可复用脚本（例如 `uses: actions/checkout@v7`） |
 | Matrix | 矩阵：用不同参数（如多个 Python 版本）跑同一个作业 |
 | Artifact | 产物：CI 过程中生成的文件（wheel、测试报告等） |
 | Runner | 运行器：执行作业的虚拟机（GitHub 免费提供 Ubuntu/macOS/Windows） |
@@ -702,7 +1091,7 @@ mutmut results
 **是什么：** 第一次运行时保存输出到一个文件（"golden file"），之后每次运行
 都跟这个文件比较。如果输出变了，测试失败——你必须明确选择"接受新输出"或"修 bug"。
 
-**SERIE 场景：** 你可以把 `serie generate lorenz --sigma 0.1 --format json`
+**SERIE 场景：** 你可以把 `serie generate lorenz --sigma 0.1`
 的输出存为 golden file。如果重构代码后输出的 JSON 结构变了，测试会抓住。
 
 ```python

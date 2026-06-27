@@ -943,9 +943,6 @@ def generate_from_trajectory_spec(
         raise ValueError("seed must be provided explicitly (no defaults).")
 
     system = trajectory_spec.system.value
-    # Historical registry key without underscores; keep enum spelling stable.
-    if system == "van_der_pol":
-        system = "vanderpol"
     all_systems = set(SYSTEMS.keys()) | DISCRETE_SYSTEMS | {"ks"}
     if system not in all_systems:
         raise ValueError(f"Unknown system: {system}. Known: {sorted(all_systems)}")

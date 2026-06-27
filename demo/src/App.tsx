@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Attractor } from "./components/Attractor";
 import { Controls } from "./components/Controls";
-import type { DemoData } from "./lib/noise";
+import type { DemoBundle, DemoData } from "./lib/noise";
 
 type LoadState =
   | { status: "loading" }
-  | { status: "ready"; data: DemoData }
+  | { status: "ready"; systems: DemoData[] }
   | { status: "error"; message: string };
 
 declare global {
@@ -26,20 +26,42 @@ function isDemoData(value: unknown): value is DemoData {
   );
 }
 
+function isDemoBundle(value: unknown): value is DemoBundle {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Partial<DemoBundle>;
+  return Array.isArray(data.systems) && data.systems.length > 0 && data.systems.every(isDemoData);
+}
+
+function systemsFromPayload(value: unknown): DemoData[] {
+  if (isDemoBundle(value)) return value.systems;
+  if (isDemoData(value)) return [value];
+  throw new Error("JSON does not match the SERIE demo-data contract");
+}
+
 export default function App() {
   const [loadState, setLoadState] = useState<LoadState>({ status: "loading" });
+  const [systemIndex, setSystemIndex] = useState(0);
   const [sigma, setSigma] = useState(0.24);
   const [showNoisy, setShowNoisy] = useState(true);
   const [drawIndex, setDrawIndex] = useState(0);
 
   const loadDemoData = (payload: unknown) => {
-    if (!isDemoData(payload)) {
-      throw new Error("JSON does not match the SERIE demo-data contract");
-    }
-    setLoadState({ status: "ready", data: payload });
+    const systems = systemsFromPayload(payload);
+    setLoadState({ status: "ready", systems });
+    setSystemIndex(0);
     setDrawIndex(0);
     setSigma(0.24);
-    setShowNoisy(payload.draws.length > 0);
+    setShowNoisy(systems[0].draws.length > 0);
+  };
+
+  const handleSystemChange = (system: string) => {
+    if (loadState.status !== "ready") return;
+    const nextIndex = loadState.systems.findIndex((item) => item.system === system);
+    if (nextIndex < 0) return;
+    const next = loadState.systems[nextIndex];
+    setSystemIndex(nextIndex);
+    setDrawIndex(0);
+    setShowNoisy(next.draws.length > 0);
   };
 
   const handleLoadDataFile = (file: File) => {
@@ -57,7 +79,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     const inlineData = window.__SERIE_DEMO_DATA__;
-    if (isDemoData(inlineData)) {
+    if (isDemoData(inlineData) || isDemoBundle(inlineData)) {
       loadDemoData(inlineData);
       return () => {
         cancelled = true;
@@ -114,7 +136,8 @@ export default function App() {
       );
     }
 
-    const { data } = loadState;
+    const systems = loadState.systems;
+    const data = systems[Math.min(systemIndex, systems.length - 1)] ?? systems[0];
     const effectiveDrawIndex =
       data.draws.length > 0 ? Math.min(drawIndex, data.draws.length - 1) : 0;
     return (
@@ -133,6 +156,7 @@ export default function App() {
             <Controls
               sigma={sigma}
               showNoisy={showNoisy}
+              systems={systems}
               system={data.system}
               seed={data.seed}
               nPoints={data.n_points}
@@ -141,6 +165,8 @@ export default function App() {
               hasNoiseDraws={data.draws.length > 0}
               sourceDim={data.source_dim}
               projection={data.projection}
+              shape={data.shape}
+              onSystemChange={handleSystemChange}
               onSigmaChange={setSigma}
               onShowNoisyChange={setShowNoisy}
               onDrawIndexChange={setDrawIndex}
@@ -160,7 +186,7 @@ export default function App() {
         </div>
       </main>
     );
-  }, [drawIndex, loadState, showNoisy, sigma]);
+  }, [drawIndex, loadState, showNoisy, sigma, systemIndex]);
 
   return content;
 }

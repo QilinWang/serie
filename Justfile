@@ -2,32 +2,27 @@ set dotenv-load := true
 
 version := "0.1.1"
 
-# Author CLI check: list SERIE CLI commands with examples.
-[group("01 author-cli")]
-cli-commands:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie commands --format json
+# Print the CLI command menu as JSON; no args. JSON is for scripts/agents to parse.
+[group("01 commands-and-data")]
+list-cli-commands:
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie list-cli-commands --format json
 
-# Author CLI check: list source names.
-[group("01 author-cli")]
-cli-list:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie list --format json
+# Print synthetic source names and known dataset IDs as JSON; no args.
+[group("01 commands-and-data")]
+list-data-ids:
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie list-data-ids --format json
 
-# Author CLI check: show external dataset directory.
-[group("01 author-cli")]
-cli-data-dir:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie data-dir --format json
+# Print the known-data folder path/existence as JSON; no args.
+[group("01 commands-and-data")]
+show-data-dir:
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie show-data-dir --format json
 
-# Author CLI check: generate one source and print metadata.
-[group("01 author-cli")]
-cli-inspect source="ou":
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie inspect {{source}} --format json
+# Print generated-cell JSON; args: source=data ID, sigma=noise dose, shock=intervention, partition=split. Defaults: ou, 0.1, none, p70_20_10.
+[group("01 commands-and-data")]
+build-cell source="ou" sigma="0.1" shock="none" partition="p70_20_10":
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie generate {{source}} --shock {{shock}} --sigma {{sigma}} --partition {{partition}}
 
-# Author CLI check: generate one cell and split train/val/test.
-[group("01 author-cli")]
-cli-generate source="ou" sigma="0.1" shock="none":
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie generate {{source}} --shock {{shock}} --sigma {{sigma}} --partition p70_20_10 --format json
-
-# High-level walkthrough: run the installed CLI end-to-end under tmp/.
+# Run the walkthrough and print JSON; default out=tmp/walkthrough, overwrites that output.
 [group("02 author-walkthrough")]
 walkthrough-run out="tmp/walkthrough":
     UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable . serie walkthrough --out {{out}} --overwrite --format json
@@ -36,120 +31,49 @@ walkthrough-run out="tmp/walkthrough":
 [group("02 author-walkthrough")]
 system-check out="tmp/system_check":
     just clean-system-check {{out}}
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" python ../docs/dev/serie_release/system_check.py --out {{out}}
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" python ../docs/serie_release/system_check.py --out {{out}}
 
-# Run the SERIE test suite against the editable checkout.
-[group("03 author-dev")]
-dev-test:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q
+# Check the checkout end-to-end: source quality, tests, wheel build, and clean install.
+[group("03 check")]
+check:
+    just check-source
+    just check-wheel
 
-# Run Ruff lint checks against the checkout.
-[group("03 author-dev")]
-dev-lint:
+# Unit under `check`: Ruff, Pyright, and pytest coverage.
+[group("03 check")]
+check-source:
     UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" ruff check .
-
-# Run Pyright on source files listed in pyrightconfig.json.
-[group("03 author-dev")]
-dev-type:
     UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" pyright
-
-# Run pytest and print a source coverage report.
-[group("03 author-dev")]
-dev-coverage:
     UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" python -m pytest tests -q --cov --cov-report=term-missing --cov-report=xml
 
-# Install local pre-commit hooks into .git/hooks/.
-[group("03 author-dev")]
-dev-hooks-install:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with "pre-commit>=4.0" pre-commit install
-
-# Run the pre-commit quality hooks across the whole checkout.
-[group("03 author-dev")]
-dev-hooks-run:
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with "pre-commit>=4.0" pre-commit run --all-files
-
-# Local version of the GitHub CI gate: lint, type-check, and test.
-[group("03 author-dev")]
-ci-check:
-    just dev-lint
-    just dev-type
-    just dev-test
-
-# Optional: create/update persistent local .venv; normal recipes do not need it.
-[group("03 author-dev")]
-dev-env:
-    env -u UV_PROJECT_ENVIRONMENT UV_CACHE_DIR=/tmp/uv-cache uv venv .venv
-    UV_CACHE_DIR=/tmp/uv-cache uv pip install --python .venv/bin/python -e ".[dev,diagnostics]"
-
-# Rebuild the packaged browser viewer template from demo/.
-# Note for agents: Vite/esbuild can hang inside the Codex sandbox; run this
-# recipe outside the sandbox if the sandboxed build stalls after `vite build`.
-[group("03 author-dev")]
-dev-demo-template:
-    cd demo && XDG_RUNTIME_DIR=/tmp TMPDIR=/tmp bun run build
-    rm -rf demo_dist
-    cp -R demo/dist demo_dist
-    rm -f demo_dist/attractor_data.json
-
-# Generate local HTML/JSON demo files for visual inspection. Outputs are ignored.
-[group("03 author-dev")]
-dev-demo-inspect out="tmp/candidate_demos":
-    rm -rf {{out}}
-    mkdir -p {{out}}
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo lorenz --out {{out}}/lorenz.html --data-out {{out}}/lorenz.json --n-points 4000 --n-draws 5 --overwrite --format json
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo rossler --out {{out}}/rossler.html --data-out {{out}}/rossler.json --n-points 4000 --n-draws 5 --overwrite --format json
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo chua --out {{out}}/chua.html --data-out {{out}}/chua.json --n-points 4000 --n-draws 5 --overwrite --format json
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo vanderpol --out {{out}}/vanderpol.html --data-out {{out}}/vanderpol.json --n-points 4000 --n-draws 5 --overwrite --format json
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo henon --out {{out}}/henon.html --data-out {{out}}/henon.json --n-points 4000 --n-draws 5 --overwrite --format json
-    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo logistic --out {{out}}/logistic.html --data-out {{out}}/logistic.json --n-points 4000 --n-draws 5 --overwrite --format json
-
-# Build sdist and wheel into dist/, then remove temporary egg-info.
-[group("04 author-release")]
-release-build:
-    just clean-egg-info
-    UV_CACHE_DIR=/tmp/uv-cache uv build . --out-dir dist
-    just clean-egg-info
-
-# Clean-install audit: build wheel, install in temp venv, verify CLI/files, clean.
-[group("04 author-release")]
-release-check tmp="tmp/release_check":
-    just clean-release-check {{tmp}}
+# Unit under `check`: build dist, install the wheel cleanly, and smoke-test the installed CLI.
+[group("03 check")]
+check-wheel tmp="tmp/release_check":
+    just clean-release-tmp {{tmp}}
+    just build-dist-release
     mkdir -p {{tmp}}
-    just clean-egg-info
-    UV_CACHE_DIR=/tmp/uv-cache uv build . --out-dir dist
     env -u UV_PROJECT_ENVIRONMENT uv venv {{tmp}}/.venv
     uv pip install --python {{tmp}}/.venv/bin/python dist/serie-{{version}}-py3-none-any.whl
     {{tmp}}/.venv/bin/serie version
-    {{tmp}}/.venv/bin/serie inspect lorenz --format json
-    {{tmp}}/.venv/bin/serie generate lorenz --out {{tmp}}/export --sigma 0.1 --array-format all --format json
+    {{tmp}}/.venv/bin/serie generate lorenz
+    {{tmp}}/.venv/bin/serie generate lorenz --out {{tmp}}/export --sigma 0.1 --array-format all
     {{tmp}}/.venv/bin/serie walkthrough --out {{tmp}}/walkthrough --overwrite --format json
-    just release-check-files {{tmp}}
-    just clean-release-check {{tmp}}
+    just check-wheel-files {{tmp}}
+    just clean-release-tmp {{tmp}}
 
-# Full local gate before publishing: test editable code, then test the built wheel.
-[group("04 author-release")]
-release-ready:
-    just ci-check
-    just release-check
-
-# Print the publish command without uploading anything.
-[group("04 author-release")]
-release-preview-publish:
-    just --dry-run release-publish
-
-# Internal release-check helper: assert expected NPY/CSV/manifest/plot files exist.
-[group("05 author-release-units")]
-[private]
-release-check-files tmp="tmp/release_check":
-    test -f {{tmp}}/export/clean.npy
-    test -f {{tmp}}/export/clean.csv
-    test -f {{tmp}}/export/clean.ipc
-    test -f {{tmp}}/export/clean.parquet
-    test -f {{tmp}}/export/noise_draws.npy
-    test -f {{tmp}}/export/noise_draws.csv
-    test -f {{tmp}}/export/noise_draws.ipc
-    test -f {{tmp}}/export/noise_draws.parquet
-    test -f {{tmp}}/export/manifest.json
+# Unit under `check-wheel`: assert expected generated files exist.
+[group("03 check")]
+check-wheel-files tmp="tmp/release_check":
+    test -f {{tmp}}/export/lorenz_*/serie_cell_identity.json
+    test -f {{tmp}}/export/lorenz_*/clean.npy
+    test -f {{tmp}}/export/lorenz_*/clean.csv
+    test -f {{tmp}}/export/lorenz_*/clean.ipc
+    test -f {{tmp}}/export/lorenz_*/clean.parquet
+    test -f {{tmp}}/export/lorenz_*/noise_draws.npy
+    test -f {{tmp}}/export/lorenz_*/noise_draws.csv
+    test -f {{tmp}}/export/lorenz_*/noise_draws.ipc
+    test -f {{tmp}}/export/lorenz_*/noise_draws.parquet
+    test -f {{tmp}}/export/lorenz_*/manifest.json
     test -f {{tmp}}/walkthrough/arrays/lorenz/clean.npy
     test -f {{tmp}}/walkthrough/arrays/lorenz/clean.csv
     test -f {{tmp}}/walkthrough/arrays/lorenz_param_shock/manifest.json
@@ -163,9 +87,50 @@ release-check-files tmp="tmp/release_check":
     test -f {{tmp}}/walkthrough/plots/param_shift_attractor.png
     test -f {{tmp}}/walkthrough/plots/param_shift_noise_attractor.png
 
-# Publish current dist/ artifacts to PyPI; requires UV_PUBLISH_TOKEN.
-[group("04 author-release")]
-release-publish:
+# Build the PyPI upload files into dist/.
+[group("04 release")]
+build-dist-release:
+    rm -rf dist
+    just clean-egg-info
+    UV_CACHE_DIR=/tmp/uv-cache uv build . --out-dir dist
+    just clean-egg-info
+
+# Build standalone static demo HTML; output is tmp/deploy_site/index.html, no args.
+[group("05 demo")]
+build-demo-static:
+    mkdir -p tmp/deploy_site
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo shapes --out-html tmp/deploy_site/index.html --overwrite --format json
+
+# Optional: create/update persistent local .venv; normal recipes do not need it.
+[group("05 dev")]
+dev-env:
+    env -u UV_PROJECT_ENVIRONMENT UV_CACHE_DIR=/tmp/uv-cache uv venv .venv
+    UV_CACHE_DIR=/tmp/uv-cache uv pip install --python .venv/bin/python -e ".[dev,diagnostics]"
+
+# Rebuild packaged browser viewer template from demo/; run outside sandbox if Vite stalls.
+[group("05 dev")]
+dev-demo-template:
+    cd demo && XDG_RUNTIME_DIR=/tmp TMPDIR=/tmp bun run build
+    rm -rf demo_dist
+    cp -R demo/dist demo_dist
+    rm -f demo_dist/attractor_data.json
+
+# Generate local demo HTML+JSON files; default out=tmp/candidate_demos, outputs are ignored.
+[group("05 dev")]
+dev-demo-inspect out="tmp/candidate_demos":
+    rm -rf {{out}}
+    mkdir -p {{out}}
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo lorenz --out-html {{out}}/lorenz.html --data-out {{out}}/lorenz.json --n-points 4000 --n-draws 5 --overwrite --format json
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo rossler --out-html {{out}}/rossler.html --data-out {{out}}/rossler.json --n-points 4000 --n-draws 5 --overwrite --format json
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo chua --out-html {{out}}/chua.html --data-out {{out}}/chua.json --n-points 4000 --n-draws 5 --overwrite --format json
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo vanderpol --out-html {{out}}/vanderpol.html --data-out {{out}}/vanderpol.json --n-points 4000 --n-draws 5 --overwrite --format json
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo henon --out-html {{out}}/henon.html --data-out {{out}}/henon.json --n-points 4000 --n-draws 5 --overwrite --format json
+    UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable ".[dev,diagnostics]" serie demo logistic --out-html {{out}}/logistic.html --data-out {{out}}/logistic.json --n-points 4000 --n-draws 5 --overwrite --format json
+
+# Run the full check, then upload dist/ files to PyPI. Requires UV_PUBLISH_TOKEN.
+[group("04 release")]
+publish-release:
+    just check
     test -n "$UV_PUBLISH_TOKEN"
     uv publish dist/serie-{{version}}.tar.gz dist/serie-{{version}}-py3-none-any.whl
 
@@ -174,9 +139,8 @@ release-publish:
 docs-list:
     find ../docs/dev/serie_release -maxdepth 2 -type f
 
-# Internal helper: remove setuptools egg-info metadata.
+# Unit under clean/build/check: remove setuptools egg-info metadata.
 [group("07 author-clean")]
-[private]
 clean-egg-info:
     rm -rf serie.egg-info
 
@@ -187,10 +151,9 @@ clean-build:
     rm -rf dist
     just clean-egg-info
 
-# Internal release-check cleanup: remove temp install audit dir and egg-info.
+# Unit under check-wheel: remove temp install audit dir and egg-info.
 [group("07 author-clean")]
-[private]
-clean-release-check tmp="tmp/release_check":
+clean-release-tmp tmp="tmp/release_check":
     rm -rf {{tmp}}
     just clean-egg-info
 

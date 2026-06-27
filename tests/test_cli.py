@@ -6,11 +6,9 @@ SERIE's JSON output.  If a JSON key disappears or a command silently changes
 its output shape, these tests catch it.
 
 Coverage:
-    discovery  — commands, list, data-dir, inspect
+    discovery  — list-cli-commands, list-data-ids, show-data-dir
     generate   — metadata-only, with arrays+plots, with shock, schema stability,
                  train_std artifact rejection
-    legacy     — inject-noise (unit + train_std), export, plot (timeseries,
-                 attractor, both, 1-channel fallback)
     walkthrough — full end-to-end audit with file existence checks
 
 Each test is named ``test_cli_<subcommand>_<what it checks>``.
@@ -19,36 +17,48 @@ Each test is named ``test_cli_<subcommand>_<what it checks>``.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from serie import cli
 
 
+def _generated_artifact_dir(payload) -> Path:
+    return Path(payload["artifacts"]["out_dir"])
+
+
 def test_cli_commands_json_is_agent_readable(capsys):
-    cli.main(["commands", "--format", "json"])
+    cli.main(["list-cli-commands", "--format", "json"])
     payload = json.loads(capsys.readouterr().out)
     commands = {row["command"]: row for row in payload["commands"]}
     assert "serie --help" == payload["help"]["all_commands"]
     assert "serie <command> --help" == payload["help"]["one_command"]
+    assert "list-cli-commands" in commands
+    assert "list-data-ids" in commands
+    assert "show-data-dir" in commands
     assert commands["generate"]["group"] == "02 generate"
     assert "sigma" in commands["generate"]["example"]
     assert "shock" in commands["generate"]["example"]
     assert commands["demo"]["group"] == "03 visualize"
+    assert "inspect" not in commands
+    assert "inject-noise" not in commands
+    assert "export" not in commands
+    assert "plot" not in commands
 
 
 def test_cli_commands_text_groups_commands(capsys):
-    cli.main(["commands"])
+    cli.main(["list-cli-commands"])
     out = capsys.readouterr().out
     assert "[01 discovery]" in out
-    assert "commands: List SERIE CLI commands with examples." in out
+    assert "list-cli-commands: List SERIE CLI commands with examples." in out
     assert "[02 generate]" in out
     assert "generate: Generate one SERIE cell" in out
     assert "Help:" in out
 
 
 def test_cli_list_json_is_agent_readable(capsys):
-    cli.main(["list", "--format", "json"])
+    cli.main(["list-data-ids", "--format", "json"])
     payload = json.loads(capsys.readouterr().out)
     assert "lorenz" in payload["synthetic"]
     assert "lorenz_param_shock" in payload["synthetic"]
@@ -63,59 +73,54 @@ def test_cli_data_dir_uses_environment(monkeypatch, tmp_path, capsys):
     root = tmp_path / "known"
     monkeypatch.setenv("SERIE_KNOWN_ROOT", str(root))
 
-    cli.main(["data-dir", "--format", "json"])
+    cli.main(["show-data-dir", "--format", "json"])
     payload = json.loads(capsys.readouterr().out)
     assert payload == {"data_dir": str(root), "exists": False}
 
 
 def test_cli_rejects_unknown_source():
-    with pytest.raises(SystemExit, match="unknown source"):
-        cli.main(["inspect", "not_a_source"])
+    with pytest.raises(SystemExit, match="Unknown system name"):
+        cli.main(["generate", "not_a_source"])
 
 
-def test_cli_inject_noise_json_is_parseable(capsys):
-    cli.main(["inject-noise", "ou", "--sigma", "0.1", "--format", "json"])
+def test_cli_generate_prints_one_cell_json(capsys):
+    cli.main(["generate", "ou", "--sigma", "0.1", "--array-format", "none"])
     payload = json.loads(capsys.readouterr().out)
     assert payload["source"] == "ou"
+    assert payload["shock"] == "none"
     assert payload["sigma"] == 0.1
-    assert payload["sigma_scale"] == "unit"
-    assert payload["shape"]["train"]
+    assert payload["cell_id"].startswith("ou_")
+    assert len(payload["cell_hash"]) == 16
+    assert payload["artifacts"] is None
 
 
-def test_cli_inject_noise_train_std_json_is_parseable(capsys):
+def test_cli_generate_train_std_json_is_parseable(capsys):
     cli.main(
         [
-            "inject-noise",
+            "generate",
             "ou",
             "--sigma",
             "1.0",
             "--sigma-scale",
             "train_std",
-            "--format",
-            "json",
         ]
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["sigma"] == 1.0
     assert payload["sigma_scale"] == "train_std"
-
-
-def test_cli_generate_prints_one_cell_json(capsys):
-    cli.main(["generate", "ou", "--sigma", "0.1", "--array-format", "none", "--format", "json"])
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["source"] == "ou"
-    assert payload["shock"] == "none"
-    assert payload["sigma"] == 0.1
-    assert payload["artifacts"] is None
+    assert payload["shape"]["train"]
 
 
 def test_cli_generate_json_schema_is_stable(capsys):
-    cli.main(["generate", "ou", "--sigma", "0.1", "--array-format", "none", "--format", "json"])
+    cli.main(["generate", "ou", "--sigma", "0.1", "--array-format", "none"])
     payload = json.loads(capsys.readouterr().out)
 
     assert sorted(payload) == [
         "artifacts",
+        "cell_hash",
+        "cell_id",
         "cell_tag",
+        "dgp_bank",
         "name",
         "noise_kind",
         "partition",
@@ -126,6 +131,23 @@ def test_cli_generate_json_schema_is_stable(capsys):
         "source",
         "train_stats",
     ]
+    assert sorted(payload["dgp_bank"]) == [
+        "D",
+        "T",
+        "feature_names",
+        "is_stochastic",
+        "n_noise_draws",
+        "n_trajectory_draws",
+        "name",
+        "noise_draw_seeds",
+        "noise_kind",
+        "noise_seed_base",
+        "trajectory_draw_seeds",
+        "trajectory_seed_base",
+    ]
+    assert payload["dgp_bank"]["feature_names"] == ["f0"]
+    assert payload["dgp_bank"]["n_trajectory_draws"] == 1
+    assert payload["dgp_bank"]["n_noise_draws"] == 1
     assert sorted(payload["shape"]) == ["full", "test", "train", "val"]
     assert sorted(payload["train_stats"]) == ["mean_head", "std_head"]
     assert payload["shape"]["full"] == [25001, 1]
@@ -153,20 +175,22 @@ def test_cli_generate_writes_arrays_and_plot_for_shock(tmp_path, capsys):
             "timeseries",
             "--max-points",
             "200",
-            "--format",
-            "json",
         ]
     )
     payload = json.loads(capsys.readouterr().out)
+    artifact_dir = _generated_artifact_dir(payload)
     assert payload["source"] == "lorenz_param_shock"
     assert payload["name"] == "lorenz_param_shock"
     assert payload["shock"] == "param"
+    assert payload["artifacts"]["requested_out_dir"] == str(out)
+    assert artifact_dir.parent == out
+    assert (artifact_dir / "serie_cell_identity.json").exists()
     assert payload["artifacts"]["arrays"]["array_format"] == "csv"
     assert payload["artifacts"]["plots"]["timeseries"]
-    assert (out / "clean.csv").exists()
-    assert (out / "noise_draws.csv").exists()
-    assert (out / "manifest.json").exists()
-    assert (out / "lorenz_param_shock_timeseries.png").exists()
+    assert (artifact_dir / "clean.csv").exists()
+    assert (artifact_dir / "noise_draws.csv").exists()
+    assert (artifact_dir / "manifest.json").exists()
+    assert (artifact_dir / "lorenz_param_shock_timeseries.png").exists()
 
 
 def test_cli_generate_rejects_train_std_artifact_writes(tmp_path):
@@ -205,7 +229,7 @@ def test_cli_demo_writes_self_contained_html_and_optional_json(
         [
             "demo",
             source,
-            "--out",
+            "--out-html",
             str(out),
             "--data-out",
             str(data_out),
@@ -231,6 +255,45 @@ def test_cli_demo_writes_self_contained_html_and_optional_json(
     assert data["n_points"] == 80
     assert len(data["clean"]) == 80
     assert len(data["draws"]) == 1
+    assert data["shape"] == {"clean": [80, 3], "draws": [1, 80, 3]}
+
+
+def test_cli_demo_shapes_writes_dropdown_bundle(tmp_path, capsys):
+    out = tmp_path / "shapes.html"
+    data_out = tmp_path / "shapes.json"
+    cli.main(
+        [
+            "demo",
+            "shapes",
+            "--out-html",
+            str(out),
+            "--data-out",
+            str(data_out),
+            "--n-points",
+            "80",
+            "--n-draws",
+            "1",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "lorenz"
+    assert payload["sources"] == ["lorenz", "rossler", "chua"]
+    assert payload["shapes"] == {
+        "lorenz": {"clean": [80, 3], "draws": [1, 80, 3]},
+        "rossler": {"clean": [80, 3], "draws": [1, 80, 3]},
+        "chua": {"clean": [80, 3], "draws": [1, 80, 3]},
+    }
+    assert out.exists()
+    assert data_out.exists()
+    assert "window.__SERIE_DEMO_DATA__" in out.read_text(encoding="utf-8")
+
+    data = json.loads(data_out.read_text(encoding="utf-8"))
+    assert data["kind"] == "serie_demo_bundle"
+    assert data["default_system"] == "lorenz"
+    assert [item["system"] for item in data["systems"]] == ["lorenz", "rossler", "chua"]
+    assert all(item["projection"] == "native_3d" for item in data["systems"])
 
 
 def test_cli_demo_converts_local_csv_to_viewer_json(tmp_path, capsys):
@@ -248,7 +311,7 @@ def test_cli_demo_converts_local_csv_to_viewer_json(tmp_path, capsys):
             str(csv_path),
             "--input-name",
             "wearable_gait",
-            "--out",
+            "--out-html",
             str(out),
             "--data-out",
             str(data_out),
@@ -272,7 +335,7 @@ def test_cli_demo_converts_local_csv_to_viewer_json(tmp_path, capsys):
     assert data["feature_names"] == ["x", "y", "zero"]
 
 
-def test_cli_demo_out_dir_writes_html_json_and_static_plots(tmp_path, capsys):
+def test_cli_demo_out_dir_writes_html_ipc_arrays_and_static_plots(tmp_path, capsys):
     pytest.importorskip("matplotlib")
     out_dir = tmp_path / "henon_demo"
     cli.main(
@@ -292,128 +355,164 @@ def test_cli_demo_out_dir_writes_html_json_and_static_plots(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["out_dir"] == str(out_dir)
     assert payload["html"] == str(out_dir / "index.html")
-    assert payload["data"] == str(out_dir / "demo_data.json")
+    assert payload["data"] is None
+    assert payload["data_out"] is None
+    assert payload["arrays"]["array_format"] == "ipc"
     assert sorted(payload["plots"]) == ["attractor", "timeseries"]
     assert (out_dir / "index.html").exists()
-    assert (out_dir / "demo_data.json").exists()
+    assert not (out_dir / "demo_data.json").exists()
+    assert (out_dir / "arrays" / "clean.ipc").exists()
+    assert (out_dir / "arrays" / "noise_draws.ipc").exists()
+    assert (out_dir / "arrays" / "manifest.json").exists()
     assert (out_dir / "static" / "henon_timeseries.png").exists()
     assert (out_dir / "static" / "henon_attractor.png").exists()
 
 
-def test_cli_export_writes_npys_and_manifest(tmp_path, capsys):
+def test_cli_generate_writes_all_array_formats_and_manifest(tmp_path, capsys):
     out = tmp_path / "export"
     cli.main(
         [
-            "export",
+            "generate",
             "ou",
             "--out",
             str(out),
             "--sigma",
             "0.25",
-            "--format",
-            "json",
+            "--array-format",
+            "all",
         ]
     )
     payload = json.loads(capsys.readouterr().out)
+    artifact_dir = _generated_artifact_dir(payload)
     assert payload["source"] == "ou"
-    assert payload["array_format"] == "all"
-    assert payload["n_noisy"] == 1
-    assert (out / "clean.npy").exists()
-    assert (out / "clean.csv").exists()
-    assert (out / "clean.ipc").exists()
-    assert (out / "clean.parquet").exists()
-    assert (out / "noise_draws.npy").exists()
-    assert (out / "noise_draws.csv").exists()
-    assert (out / "noise_draws.ipc").exists()
-    assert (out / "noise_draws.parquet").exists()
-    assert (out / "manifest.json").exists()
+    assert payload["artifacts"]["arrays"]["array_format"] == "all"
+    assert payload["artifacts"]["arrays"]["n_noisy"] == 1
+    assert artifact_dir.parent == out
+    assert (artifact_dir / "serie_cell_identity.json").exists()
+    assert (artifact_dir / "clean.npy").exists()
+    assert (artifact_dir / "clean.csv").exists()
+    assert (artifact_dir / "clean.ipc").exists()
+    assert (artifact_dir / "clean.parquet").exists()
+    assert (artifact_dir / "noise_draws.npy").exists()
+    assert (artifact_dir / "noise_draws.csv").exists()
+    assert (artifact_dir / "noise_draws.ipc").exists()
+    assert (artifact_dir / "noise_draws.parquet").exists()
+    assert (artifact_dir / "manifest.json").exists()
 
 
-def test_cli_plot_both_writes_timeseries_and_attractor(tmp_path, capsys):
+def test_cli_generate_out_is_identity_named_and_idempotent(tmp_path, capsys):
+    out = tmp_path / "export"
+    args = [
+        "generate",
+        "ou",
+        "--out",
+        str(out),
+        "--sigma",
+        "0.25",
+        "--array-format",
+        "csv",
+    ]
+
+    cli.main(args)
+    first = json.loads(capsys.readouterr().out)
+    cli.main(args)
+    second = json.loads(capsys.readouterr().out)
+
+    assert first["cell_id"] == second["cell_id"]
+    assert first["cell_hash"] == second["cell_hash"]
+    assert first["artifacts"]["out_dir"] == second["artifacts"]["out_dir"]
+    artifact_dir = _generated_artifact_dir(second)
+    assert artifact_dir.parent == out
+    assert (artifact_dir / "serie_cell_identity.json").exists()
+    assert (artifact_dir / "clean.csv").exists()
+
+
+def test_cli_generate_plot_both_writes_timeseries_and_attractor(tmp_path, capsys):
     pytest.importorskip("matplotlib")
-    out = tmp_path / "lorenz.png"
+    out = tmp_path / "cell"
     cli.main(
         [
-            "plot",
+            "generate",
             "lorenz",
             "--out",
             str(out),
-            "--kind",
+            "--plot",
             "both",
             "--sigma",
             "0.1",
             "--max-points",
             "200",
-            "--format",
-            "json",
         ]
     )
     payload = json.loads(capsys.readouterr().out)
+    artifact_dir = _generated_artifact_dir(payload)
     assert payload["source"] == "lorenz"
-    assert sorted(payload["files"]) == ["attractor", "timeseries"]
-    assert (tmp_path / "lorenz_timeseries.png").exists()
-    assert (tmp_path / "lorenz_attractor.png").exists()
+    assert sorted(payload["artifacts"]["plots"]) == ["attractor", "timeseries"]
+    assert (artifact_dir / "lorenz_timeseries.png").exists()
+    assert (artifact_dir / "lorenz_attractor.png").exists()
 
 
-def test_cli_plot_intervention_source_writes_timeseries_with_reference_path(tmp_path, capsys):
+def test_cli_generate_plot_intervention_source_writes_timeseries_with_reference_path(
+    tmp_path, capsys
+):
     pytest.importorskip("matplotlib")
-    out = tmp_path / "lorenz_param_shock.png"
+    out = tmp_path / "cell"
     cli.main(
         [
-            "plot",
-            "lorenz_param_shock",
+            "generate",
+            "lorenz",
+            "--shock",
+            "param",
             "--out",
             str(out),
-            "--kind",
+            "--plot",
             "timeseries",
             "--sigma",
             "0.1",
             "--max-points",
             "200",
-            "--format",
-            "json",
         ]
     )
     payload = json.loads(capsys.readouterr().out)
+    artifact_dir = _generated_artifact_dir(payload)
     assert payload["source"] == "lorenz_param_shock"
-    assert sorted(payload["files"]) == ["timeseries"]
-    assert out.exists()
+    assert sorted(payload["artifacts"]["plots"]) == ["timeseries"]
+    assert (artifact_dir / "lorenz_param_shock_timeseries.png").exists()
 
 
-def test_cli_plot_both_skips_attractor_for_one_channel_source(tmp_path, capsys):
+def test_cli_generate_plot_both_skips_attractor_for_one_channel_source(tmp_path, capsys):
     pytest.importorskip("matplotlib")
-    out = tmp_path / "ou.png"
+    out = tmp_path / "cell"
     cli.main(
         [
-            "plot",
+            "generate",
             "ou",
             "--out",
             str(out),
-            "--kind",
+            "--plot",
             "both",
             "--max-points",
             "200",
-            "--format",
-            "json",
         ]
     )
     payload = json.loads(capsys.readouterr().out)
+    artifact_dir = _generated_artifact_dir(payload)
     assert payload["source"] == "ou"
-    assert sorted(payload["files"]) == ["timeseries"]
-    assert (tmp_path / "ou_timeseries.png").exists()
-    assert not (tmp_path / "ou_attractor.png").exists()
+    assert sorted(payload["artifacts"]["plots"]) == ["timeseries"]
+    assert (artifact_dir / "ou_timeseries.png").exists()
+    assert not (artifact_dir / "ou_attractor.png").exists()
 
 
-def test_cli_plot_attractor_rejects_one_channel_source(tmp_path):
+def test_cli_generate_plot_attractor_rejects_one_channel_source(tmp_path):
     pytest.importorskip("matplotlib")
     with pytest.raises(ValueError, match="requires at least two channels"):
         cli.main(
             [
-                "plot",
+                "generate",
                 "ou",
                 "--out",
-                str(tmp_path / "ou.png"),
-                "--kind",
+                str(tmp_path / "cell"),
+                "--plot",
                 "attractor",
             ]
         )

@@ -1,17 +1,28 @@
 name: Pages Demo
 
+# This workflow publishes the SERIE browser demo to GitHub Pages.
+# In the GitHub UI, use:
+#   Settings -> Pages -> Source: GitHub Actions
+# Do not choose the suggested Jekyll or Static HTML template; this file is the
+# custom workflow that builds the page.
 on:
+  # Lets you click "Run workflow" from the GitHub Actions tab.
   workflow_dispatch:
+  # Also redeploys whenever main changes.
   push:
     branches:
       - main
 
 permissions:
+  # Required by actions/checkout.
   contents: read
+  # Required to upload and deploy a GitHub Pages artifact.
   pages: write
+  # Required by GitHub Pages OIDC deployment.
   id-token: write
 
 concurrency:
+  # If several pushes happen quickly, keep only the newest Pages deploy.
   group: pages
   cancel-in-progress: true
 
@@ -24,23 +35,30 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      # uv gives the workflow a reproducible Python/package runner without
+      # needing pip/virtualenv commands by hand.
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
 
+      # SERIE targets modern Python; Pages uses the same primary lane as release.
       - name: Install Python
         run: uv python install 3.14
 
-      - name: Generate offline Lorenz demo
+      # Build one self-contained HTML file from the installed editable checkout.
+      # The generated site/ directory is what Pages will serve.
+      - name: Generate offline shape demo
         run: |
           mkdir -p site
-          uv run --python 3.14 --no-project --with-editable ".[dev,diagnostics]" serie demo lorenz --out site/index.html --overwrite
+          uv run --python 3.14 --no-project --with-editable ".[dev,diagnostics]" serie demo shapes --out-html site/index.html --overwrite
           touch site/.nojekyll
 
+      # Tell GitHub Pages this job is producing a Pages artifact.
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
+      # Upload the static site directory created above.
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -55,6 +73,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+      # Publish the uploaded artifact. After this succeeds, the deployment URL
+      # appears in the job summary and under Settings -> Pages.
       - name: Deploy Pages artifact
         id: deployment
         uses: actions/deploy-pages@v4
