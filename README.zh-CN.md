@@ -2,7 +2,7 @@
 
 **在模型上线前，先把它放进你真正担心的场景里压一压：机制变化、观测噪声、冲击干预，全部由你指定；底层真值完全可知。**
 
-[English README](README.md)
+[English README](README.md) · Rust 引擎：[**serie-rs**](https://crates.io/crates/serie-rs)（[源码](https://github.com/qilinwang/serie-rs)）
 
 你已经训练好了一个时间序列预测模型，验证集指标也不错。接下来真正难的问题是：**它能不能安全地用在现实里？**
 
@@ -151,187 +151,13 @@ cd serie
 python -m pip install -e ".[dev,diagnostics]"
 ```
 
-## 命令行快速上手
+## 文档
 
-安装后会得到一个命令：
+详细参考文档在 [`docs/`](docs/)：
 
-```bash
-serie
-```
-
-命令结构是：
-
-```bash
-serie <subcommand> <source> --option value
-```
-
-例如：
-
-```bash
-serie generate lorenz --shock param --sigma 0.1
-```
-
-读作：
-
-- `serie`：运行 SERIE CLI；
-- `generate`：生成一个 SERIE dataset cell；
-- `lorenz`：使用 Lorenz source；
-- `--shock param`：使用内置参数冲击干预；
-- `--sigma 0.1`：观测噪声剂量；
-- `generate`：始终输出 JSON，方便人和脚本读取。
-
-第一次安装后，先跑这三条：
-
-```bash
-serie list-data-ids
-serie demo lorenz --out-html tmp/lorenz_demo.html
-serie generate lorenz --sigma 0.1
-```
-
-它们分别做三件事：
-
-1. 看看有哪些内置 source；
-2. 生成一个离线交互式 Lorenz attractor HTML；
-3. 生成一个 dataset cell，并返回 train/validation/test 切分摘要。
-
-如果你想做完整安装检查，再跑：
-
-```bash
-serie list-cli-commands --format json
-serie show-data-dir --format json
-serie generate ou --sigma 0.1
-serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz_cell --array-format all --plot both
-serie walkthrough --out tmp/walkthrough --array-format all --overwrite --format json
-```
-
-## 常用 CLI
-
-### 查看命令列表
-
-```bash
-serie list-cli-commands
-serie list-cli-commands --format json
-```
-
-### 查看内置数据源
-
-```bash
-serie list-data-ids --format json
-```
-
-### 生成一个 SERIE cell
-
-```bash
-serie generate lorenz --sigma 0.25
-serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz_cell --array-format csv --plot both
-serie generate ou --sigma 1.0 --sigma-scale train_std
-```
-
-`generate` 是主要 CLI：它会生成 source，按需要加入干预，注入观测噪声，切分 train/validation/test，并且可以选择写出数组和图。输出 JSON 会包含 DGP bank 摘要和 cell 切分摘要。
-
-- `--shock none|param|state|switch`：选择干预类型。比如 `lorenz --shock param` 会解析成 `lorenz_param_shock`。
-- `--sigma`：观测噪声剂量。
-- `--sigma-scale unit`：直接使用 `sigma`。
-- `--sigma-scale train_std`：按训练段每个通道的标准差缩放噪声，适合不同通道有不同物理单位的真实记录。这个模式目前用于 JSON 切分摘要；如果要同时写数组或图，请使用 `--sigma-scale unit`。
-- `--out`：写文件的根目录。不传 `--out` 时只打印 JSON 摘要；传入后文件会写到稳定的 `<source>_<cell-hash>` 子目录。
-- `--array-format none|npy|csv|ipc|parquet|table|all`：写出数组和 `manifest.json`。
-- `--plot none|timeseries|attractor|both`：写出静态图。
-
-### 生成交互式 HTML demo
-
-```bash
-serie demo lorenz --out-html tmp/lorenz_demo.html
-serie demo rossler --out-html tmp/rossler_demo.html --n-draws 30 --overwrite
-serie demo chua --out-html tmp/chua_demo.html --n-points 4000 --n-draws 30 --overwrite
-serie demo henon --out-dir tmp/henon_demo_pack --overwrite
-```
-
-生成的是一个单文件 HTML。浏览器里可以拖拽 3D attractor，滑动 `sigma` 实时看到：
-
-```text
-clean + sigma * noise_draw
-```
-
-这里的 `sigma` 是 unit-noise scale 下的自然噪声倍率。`Noise realization` 下拉框选择的是第几个冻结噪声 realization；同一个 realization 会在不同 `sigma` 下重复使用。
-
-这些 HTML 很适合放到 GitHub Release 或静态网站作为展示材料，但不应该打进 PyPI wheel。PyPI 包里只带一个小的 viewer template，真正的数据由 `serie demo` 在本地生成后内联进 HTML。
-
-如果你想一次得到一个检查用文件夹，用 `--out-dir`。它会写出
-`index.html`、`arrays/` 里的 IPC 数组，以及 `static/` 里的 PNG 图。只有在你
-额外传 `--data-out path/to/demo.json` 时，才会单独写出 browser JSON payload。
-普通 `--out-html` 仍然是最适合分享的单文件 HTML。
-
-## Python API
-
-### 构建一次，多次注入
-
-```python
-from serie import build_dgp_bank, inject_noise
-
-bank = build_dgp_bank("lorenz", seed=42, n_noise_draws=8)
-
-for sigma in [0.0, 0.1, 0.25, 0.5]:
-    split = inject_noise(bank, sigma=sigma)
-    print(sigma, split.values.shape)
-```
-
-### 使用真实干净数据
-
-```python
-from serie import build_empirical_dgp_bank, inject_noise
-
-bank = build_empirical_dgp_bank(values, name="wearable_gait")
-split = inject_noise(bank, sigma=1.0, sigma_scale="train_std")
-```
-
-`values` 应该是 `[T, D]` 形状的干净数组。SERIE 会在它上面构建冻结噪声 draw，并按你指定的 `sigma` 生成观测序列。
-
-### 自定义噪声分布
-
-```python
-def laplace_noise(rng, shape):
-    return rng.laplace(0.0, 1.0 / 2**0.5, size=shape)
-
-bank = build_dgp_bank("lorenz", noise_kind=laplace_noise)
-split = inject_noise(bank, sigma=0.2)
-```
-
-SERIE 内置噪声默认是 unit variance，这样 `sigma` 可以直接理解为噪声标准差倍率。自定义噪声不强制必须 unit variance；真正要求是你知道并声明噪声 law。只是如果你想公平比较不同 law 的“形状”而不是“能量”，unit variance 是最清楚的约定。
-
-### 干预
-
-```python
-from attrs import evolve
-from serie import ShockEvent, ShockSchedule, TrajectorySpec, build_dgp_bank
-
-base = TrajectorySpec.lorenz()
-source = evolve(
-    base,
-    shocks=ShockSchedule.single(
-        ShockEvent.params_step_change(
-            params_after=evolve(base.params, rho=35.0),
-            t_start=0.60,
-        )
-    ),
-)
-bank = build_dgp_bank(source, seed=42)
-```
-
-SERIE 支持多个按时间排序的参数干预和状态干预；例如可以先做
-`params_stepped_transition(...)`，再做 `state_perturbation(...)`。`trajectory_switch(...)`
-仍然保持单事件，因为 trajectory switch 是在两条独立生成的轨迹之间切换，不是在同一条积分轨迹里原地扰动。
-
-### 种子和 draw ordinal
-
-SERIE 使用 `np.random.SeedSequence(...).spawn(...)` 生成独立 child seeds。不要把 `seed + i` 当成独立随机流。
-
-需要区分两件事：
-
-- `*_seed_base`：你传入的根种子，用来重新生成整个 draw bank；
-- `*_draw_ordinal`：第几个 spawn/draw，也就是重建某个 draw 所需的 ordinal；
-- `*_draw_seed`：由根种子和 ordinal 派生出的 child seed，方便审计和对照。
-
-因此 `noise_draw_ordinal=3` 的意思不是“随机数种子是 3”，而是“使用这个 bank 中第 3 个冻结噪声 realization”。它对应的真实 child seed 会记录在 metadata 里。
+- [命令行 API](docs/command_line.zh-CN.md) —— 每个 `serie` 命令、选项和示例。
+- [Python API](docs/python_api.zh-CN.md) —— 可编程接口：`build_dgp_bank`、`inject_noise`、干预、种子溯源、draw design，以及稳定的导入列表。
+- [系统预设](docs/system_presets.md) —— 每个内置 source 的稳定性说明和参数选择。
 
 ## 发布边界
 
@@ -365,6 +191,17 @@ serie show-data-dir --format json
 打印出来的位置，或者通过 `SERIE_KNOWN_ROOT` 指定。
 
 这保持了包本身的干净，也避免让用户在安装一个库时被迫下载几百 MB 数据。
+
+## Rust 引擎 (serie-rs)
+
+SERIE 有一个 Rust 姊妹包 [**serie-rs**](https://crates.io/crates/serie-rs)
+（[源码](https://github.com/qilinwang/serie-rs)）。两者是同一套协议下的姊妹实现，而不是
+简单的移植：本 Python 包是面向用户、有文档的 benchmark 表面（CLI、demo、论文引用的术语
+体系），而 `serie-rs` 是数据层引擎 —— 相同的阶段流水线（`load → clean → inject_noise →
+partition → ready`）和相同的系统家族，用 Rust 实现。它还能读取本包写出的 grouped
+`dgp_bank.safetensors`（`serie generate --array-format safetensors`），所以你可以在
+Python 里构建一次 bank，再从 Rust 里消费。（`serie` 在 crates.io 上已被占用，因此用了
+`-rs` 后缀。）
 
 ## 测试
 
