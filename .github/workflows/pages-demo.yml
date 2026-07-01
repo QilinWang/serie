@@ -54,6 +54,12 @@ jobs:
           uv run --python 3.14 --no-project --with-editable ".[dev,diagnostics]" serie demo shapes --out-html site/index.html --overwrite
           touch site/.nojekyll
 
+      # Add the serie-rs (Rust) attractor demo at /demo-rs/. It's committed
+      # pre-built static (the React viewer baked with `serie-rs demo shapes`),
+      # so nothing Rust runs here — Pages serves the folder as-is.
+      - name: Include the serie-rs demo
+        run: cp -r demo-rs site/demo-rs
+
       # Tell GitHub Pages this job is producing a Pages artifact.
       - name: Configure Pages
         uses: actions/configure-pages@v5
