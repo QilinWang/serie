@@ -8,6 +8,7 @@ Public API (also re-exported from ``serie``):
     build_empirical_dgp_bank(values)  → DGPBank   (wrap real data / 包装真实数据)
     inject_noise(bank, sigma=...)     → SplitTimeSeriesData  (inject many times / 多次注入)
     export_dgp_bank_files(bank, path) → dict       (write arrays to disk / 写数组到磁盘)
+    export_dgp_bank_safetensors(bank, path) → dict (write one grouped tensor artifact)
     load_data(source)                 → TimeSeriesData  (load one source / 加载一个数据源)
 
 DGP = Data Generating Process (数据生成过程).
@@ -157,6 +158,26 @@ def export_dgp_bank_files(bank, out_dir, **kw) -> dict[str, object]:
     return _export_dgp_bank_files(bank, out_dir, **kw)
 
 
+def export_dgp_bank_safetensors(bank, out_path, **kw) -> dict[str, object]:
+    """Write one grouped `dgp_bank.safetensors` artifact.
+
+    Stores `clean`, `noise`, and optional `noisy_sigma_*` tensors with small
+    string metadata in the safetensors header. Use
+    `export_dgp_bank_files(..., array_format="safetensors")` when you want the
+    standard export folder with `manifest.json`.
+    """
+    from .api import export_dgp_bank_safetensors as _export_dgp_bank_safetensors
+
+    return _export_dgp_bank_safetensors(bank, out_path, **kw)
+
+
+def load_dgp_bank_safetensors(path):
+    """Load one grouped `dgp_bank.safetensors` artifact."""
+    from .api import load_dgp_bank_safetensors as _load_dgp_bank_safetensors
+
+    return _load_dgp_bank_safetensors(path)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Lazy exports
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -172,7 +193,7 @@ if TYPE_CHECKING:
         TitrationPlan,
     )
     from .specs import ShockEvent, ShockSchedule, ShockType, TitrationCell, TrajectorySpec, DGPBank
-    from .api import build_clean_split_bundle, build_noisy_bundle_for_cell, iter_cells
+    from .api import DGPBankTensors, build_clean_split_bundle, build_noisy_bundle_for_cell, iter_cells
 
 
 def __getattr__(name: str):
@@ -213,6 +234,9 @@ def __getattr__(name: str):
         "build_clean_split_bundle",
         "build_noisy_bundle_for_cell",
         "export_dgp_bank_files",
+        "export_dgp_bank_safetensors",
+        "load_dgp_bank_safetensors",
+        "DGPBankTensors",
     }:
         from . import api as _api
 
@@ -234,6 +258,7 @@ __all__ = [
     "KnownLoadMode",
     "SourceKind",
     "DGPBank",
+    "DGPBankTensors",
     "TitrationCell",
     "ShockEvent",
     "ShockSchedule",
@@ -246,6 +271,8 @@ __all__ = [
     "build_empirical_dgp_bank",
     "inject_noise",
     "export_dgp_bank_files",
+    "export_dgp_bank_safetensors",
+    "load_dgp_bank_safetensors",
     "load_data",
     "iter_cells",
     "build_clean_split_bundle",

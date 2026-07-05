@@ -29,11 +29,11 @@ build-cell source="ou" sigma="0.1" shock="none" partition="p70_20_10":
 walkthrough-run out="tmp/walkthrough":
     {{uv_serie}} walkthrough --out {{out}} --overwrite --format json
 
-# Meaningful every-system visual audit: clean/noise plus intervention cases, PNGs only.
+# Build PNG/manifest artifacts for human review of every public synthetic system.
 [group("02 author-walkthrough")]
-system-check out="tmp/system_check":
-    just clean-system-check {{out}}
-    {{uv_dev}} python ../docs/serie_release/system_check.py --out {{out}}
+build-synthetic-system-review-plots out="tmp/synthetic_system_review_plots":
+    just clean-synthetic-system-review-plots {{out}}
+    {{uv_dev}} python ../docs/serie_release/build_synthetic_system_review_plots.py --out {{out}}
 
 # Check the checkout end-to-end: source quality, tests, wheel build, and clean install.
 [group("03 check")]
@@ -71,6 +71,7 @@ check-wheel-files tmp="tmp/release_check":
     test -f {{tmp}}/export/lorenz_*/clean.csv
     test -f {{tmp}}/export/lorenz_*/clean.ipc
     test -f {{tmp}}/export/lorenz_*/clean.parquet
+    test -f {{tmp}}/export/lorenz_*/dgp_bank.safetensors
     test -f {{tmp}}/export/lorenz_*/noise_draws.npy
     test -f {{tmp}}/export/lorenz_*/noise_draws.csv
     test -f {{tmp}}/export/lorenz_*/noise_draws.ipc
@@ -78,6 +79,7 @@ check-wheel-files tmp="tmp/release_check":
     test -f {{tmp}}/export/lorenz_*/manifest.json
     test -f {{tmp}}/walkthrough/arrays/lorenz/clean.npy
     test -f {{tmp}}/walkthrough/arrays/lorenz/clean.csv
+    test -f {{tmp}}/walkthrough/arrays/lorenz/dgp_bank.safetensors
     test -f {{tmp}}/walkthrough/arrays/lorenz_param_shock/manifest.json
     test -f {{tmp}}/walkthrough/arrays/lorenz_param_shock/noise_draws.csv
     test -f {{tmp}}/walkthrough/plots/regular_timeseries.png
@@ -139,7 +141,7 @@ publish-release:
 # List maintainer notes that are intentionally outside the PyPI package.
 [group("06 author-docs")]
 docs-list:
-    find ../docs/dev/serie_release -maxdepth 2 -type f
+    find ../docs/serie_release -maxdepth 2 -type f
 
 # Unit under clean/build/check: remove setuptools egg-info metadata.
 [group("07 author-clean")]
@@ -165,9 +167,9 @@ clean-tmp:
     rm -rf tmp
     just clean-egg-info
 
-# Remove only the every-system visual audit folder.
+# Remove only the synthetic-system review plot folder.
 [group("07 author-clean")]
-clean-system-check out="tmp/system_check":
+clean-synthetic-system-review-plots out="tmp/synthetic_system_review_plots":
     rm -rf {{out}}
     just clean-egg-info
 

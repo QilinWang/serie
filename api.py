@@ -10,12 +10,15 @@ Functions / 函数:
     build_clean_split_bundle(bank, ...) → DataBundle
     build_noisy_bundle_for_cell(bank, ...) → DataBundle
     export_dgp_bank_files(bank, out_dir) → dict
+    dgp_bank_from_tensors(tensors) → DGPBank
+    known_asset_paths(meta) → list[Path]
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 import copy
+from dataclasses import dataclass
 from decimal import Decimal
 import json
 import logging
@@ -198,6 +201,48 @@ def _resolve_source(source) -> TrajectorySpec | KnownMeta | KnownDataID:
     )
 
 
+def known_asset_paths(meta: KnownMeta) -> list[Path]:
+    """Resolve the exact on-disk asset file(s) a known-data load will read.
+
+    Mirrors `StageLoadKnownCSV.apply` path resolution without loading anything:
+    `meta.path` when it exists, else the `.csv` fallback beside it; for a CSV
+    source, a fresh `.ipc` cache (mtime >= the CSV's) wins, matching the load.
+    Callers that fingerprint asset bytes should resolve BEFORE loading — a CSV
+    load with save_ipc may rewrite the `.ipc` cache afterwards.
+
+    Args:
+        meta: KnownMeta describing one known dataset, e.g. KnownMeta.etth1().
+
+    Returns:
+        List of file paths the loader would read, normally exactly one.
+
+    Raises:
+        FileNotFoundError: when neither `meta.path` nor its `.csv` fallback
+            exists, with the same prepare-the-data message the loader raises.
+
+    Example:
+        >>> known_asset_paths(KnownMeta.etth1())
+        [PosixPath('/home/user/.cache/serie/known/ett/ETTh1.ipc')]
+    """
+    from .pipeline import _known_data_missing_message
+
+    source_path = Path(meta.path).expanduser()
+    if not source_path.exists():
+        csv_fallback = source_path.with_suffix(".csv")
+        if not csv_fallback.exists():
+            raise FileNotFoundError(_known_data_missing_message(meta, source_path))
+        source_path = csv_fallback
+    if source_path.suffix.lower() == ".ipc":
+        return [source_path]
+    csv_path = source_path
+    ipc_path = csv_path.with_suffix(".ipc")  # Feather/IPC format
+    if ipc_path.exists() and (
+        not csv_path.exists() or ipc_path.stat().st_mtime >= csv_path.stat().st_mtime
+    ):
+        return [ipc_path]
+    return [csv_path]
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Public API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -210,7 +255,45 @@ def _resolve_source(source) -> TrajectorySpec | KnownMeta | KnownDataID:
 # multiplier and the draw distribution owns the physical scale.
 NoiseSampler = Callable[[np.random.Generator, tuple[int, ...]], np.ndarray]
 SigmaScale = Literal["unit", "train_std"]
-ArrayFormat = Literal["npy", "csv", "ipc", "parquet", "table", "all"]
+ArrayFormat = Literal["npy", "csv", "ipc", "parquet", "table", "safetensors", "all"]
+
+
+@dataclass(frozen=True, slots=True)
+class DGPBankTensors:
+    """Loaded grouped DGP-bank tensor artifact.
+
+    Args:
+        path: The loaded `dgp_bank.safetensors` file.
+        tensors: Named tensors from the file. Required keys are `clean` and
+            `noise`; optional keys start with `noisy_sigma_`.
+        metadata: String metadata stored in the safetensors header.
+        feature_names: Names for the feature axis D.
+
+    Example:
+        >>> artifact = load_dgp_bank_safetensors("dgp_bank.safetensors")
+        >>> artifact.clean.shape
+        (1, 36000, 3)
+    """
+
+    path: Path
+    tensors: dict[str, np.ndarray]
+    metadata: dict[str, str]
+    feature_names: tuple[str, ...]
+
+    @property
+    def clean(self) -> np.ndarray:
+        """Clean trajectory draws, shape [N_trajectory, T, D]."""
+        return self.tensors["clean"]
+
+    @property
+    def noise(self) -> np.ndarray:
+        """Reusable unit-noise draws, shape [N_noise, T, D]."""
+        return self.tensors["noise"]
+
+    @property
+    def noisy_tensor_names(self) -> tuple[str, ...]:
+        """Noisy cell tensor names stored in this artifact."""
+        return tuple(name for name in self.tensors if name.startswith("noisy_sigma_"))
 
 _NOISE_KINDS: dict[str, NoiseSampler] = {
     # N(0, 1) — the default of both papers' main protocol.
@@ -440,6 +523,216 @@ def build_empirical_dgp_bank(
     )
 
 
+def export_dgp_bank_safetensors(
+    bank: DGPBank,
+    out_path: str | Path,
+    *,
+    sigmas: tuple[float, ...] = (),
+    draw_design: DrawDesign | str = DrawDesign.AUTO,
+    overwrite: bool = False,
+) -> dict[str, object]:
+    """Write one grouped `dgp_bank.safetensors` artifact for a DGP bank.
+
+    Args:
+        bank: DGPBank with `clean [N,T,D]` and reusable `noise [M,T,D]`.
+        out_path: Output file path, usually `dgp_bank.safetensors`.
+        sigmas: Optional noisy cells to materialize as named tensors.
+        draw_design: Draw pairing policy for noisy tensors. Valid values match
+            DrawDesign: "auto", "joint", "cross_product", "noise_only",
+            "trajectory_fixed".
+        overwrite: Replace an existing file when True.
+
+    Returns:
+        Metadata dict also embedded in the safetensors header. When this is
+        called through `export_dgp_bank_files(..., array_format="safetensors")`,
+        the same dict is also written to `manifest.json`.
+
+    Example:
+        >>> meta = export_dgp_bank_safetensors(bank, "dgp_bank.safetensors", sigmas=(0.1,))
+        >>> meta["files"]["safetensors"]
+        'dgp_bank.safetensors'
+    """
+    try:
+        from safetensors.numpy import save_file
+    except ImportError as exc:  # pragma: no cover - depends on install shape
+        raise ImportError("export_dgp_bank_safetensors requires safetensors>=0.7") from exc
+
+    path = Path(out_path)
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"{path} already exists; pass overwrite=True to replace it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    design = DrawDesign(draw_design)
+    sigma_values = tuple(float(sigma) for sigma in sigmas)
+    tensors: dict[str, np.ndarray] = {
+        "clean": np.ascontiguousarray(bank.clean),
+        "noise": np.ascontiguousarray(bank.noise_draws),
+    }
+    noisy_entries: list[dict[str, object]] = []
+
+    n_trajectory_export, n_noise_export = _plan_counts_for_export(bank, design)
+    export_cells = TitrationPlan(
+        noise_levels=sigma_values or (0.0,),
+        n_trajectory_draws=n_trajectory_export,
+        n_noise_draws=n_noise_export,
+        noise_seed_base=bank.noise_seed_base,
+        draw_design=design,
+    )
+    for sigma in sigma_values:
+        sigma_name = _sigma_to_name(sigma)
+        for cell in export_cells.iter_cells(bank):
+            if cell.noise_level != sigma:
+                continue
+            tensor_name = (
+                f"noisy_sigma_{sigma_name}"
+                f"_traj{cell.trajectory_draw_ordinal}"
+                f"_noise{cell.noise_draw_ordinal}"
+            )
+            tensors[tensor_name] = np.ascontiguousarray(
+                bank.build_observed_series(
+                    noise_level=sigma,
+                    trajectory_draw_ordinal=cell.trajectory_draw_ordinal,
+                    noise_draw_ordinal=cell.noise_draw_ordinal,
+                )
+            )
+            noisy_entries.append(
+                {
+                    "tensor": tensor_name,
+                    "cell_tag": cell.tag,
+                    "sigma": sigma,
+                    "trajectory_draw_ordinal": cell.trajectory_draw_ordinal,
+                    "noise_draw_ordinal": cell.noise_draw_ordinal,
+                    "trajectory_draw_seed": int(cell.trajectory_draw_seed),
+                    "noise_draw_seed": int(cell.noise_draw_seed),
+                }
+            )
+
+    metadata: dict[str, object] = {
+        "schema": "serie.dgp_bank_safetensors.v1",
+        "serie_version": __version__,
+        "protocol_version": PROTOCOL_VERSION,
+        "source_name": bank.name,
+        "noise_kind": bank.noise_kind,
+        "is_stochastic": bool(bank.is_stochastic),
+        "draw_design": design.value,
+        "array_format": "safetensors",
+        "axis_order": "clean/noise=[draw,T,D]; noisy=[T,D]",
+        "shape": {
+            "clean": list(bank.clean.shape),
+            "noise": list(bank.noise_draws.shape),
+        },
+        "feature_names": list(bank.feature_names),
+        "trajectory_seed_base": int(bank.trajectory_seed_base),
+        "noise_seed_base": int(bank.noise_seed_base),
+        "trajectory_draw_seeds": [int(seed) for seed in bank.trajectory_draw_seeds],
+        "noise_draw_seeds": [int(seed) for seed in bank.noise_draw_seeds],
+        "sigmas": list(sigma_values),
+        "files": {"safetensors": path.name},
+        "noisy": noisy_entries,
+        "tensors": sorted(tensors),
+    }
+    header_metadata = {key: json.dumps(value) if not isinstance(value, str) else value for key, value in metadata.items()}
+    save_file(tensors, str(path), metadata=header_metadata)
+    return metadata
+
+
+def load_dgp_bank_safetensors(path: str | Path) -> DGPBankTensors:
+    """Load a grouped `dgp_bank.safetensors` artifact.
+
+    Args:
+        path: File written by `export_dgp_bank_safetensors`.
+
+    Returns:
+        DGPBankTensors with one named tensor map and parsed feature names.
+
+    Example:
+        >>> artifact = load_dgp_bank_safetensors("dgp_bank.safetensors")
+        >>> artifact.feature_names
+        ('f0', 'f1', 'f2')
+    """
+    try:
+        from safetensors import safe_open
+    except ImportError as exc:  # pragma: no cover - depends on install shape
+        raise ImportError("load_dgp_bank_safetensors requires safetensors>=0.7") from exc
+
+    artifact_path = Path(path)
+    with safe_open(artifact_path, framework="np") as f:
+        metadata = dict(f.metadata() or {})
+        tensors = {name: np.ascontiguousarray(f.get_tensor(name)) for name in f.keys()}
+    missing = {"clean", "noise"} - set(tensors)
+    if missing:
+        raise ValueError(f"{artifact_path} missing required tensors: {sorted(missing)}")
+
+    raw_feature_names = metadata.get("feature_names")
+    if raw_feature_names is None:
+        feature_names = tuple(f"f{i}" for i in range(tensors["clean"].shape[-1]))
+    else:
+        parsed = json.loads(raw_feature_names)
+        if not isinstance(parsed, list) or not all(isinstance(name, str) for name in parsed):
+            raise ValueError(f"feature_names metadata must be a JSON string list, got {raw_feature_names!r}")
+        feature_names = tuple(parsed)
+    if len(feature_names) != tensors["clean"].shape[-1]:
+        raise ValueError(
+            f"feature_names length {len(feature_names)} does not match D={tensors['clean'].shape[-1]}"
+        )
+    return DGPBankTensors(
+        path=artifact_path,
+        tensors=tensors,
+        metadata=metadata,
+        feature_names=feature_names,
+    )
+
+
+def dgp_bank_from_tensors(tensors: DGPBankTensors) -> DGPBank:
+    """Rebuild an in-memory DGPBank from a loaded `dgp_bank.safetensors` artifact.
+
+    The artifact must carry the full serie metadata header — source_name,
+    noise_kind, is_stochastic, seed bases, and spawned draw-seed lists — as
+    written by `export_dgp_bank_safetensors` or by the serie-rs bank generator
+    (`serie_rs::dgp_bank::generate_dgp_bank`). DGPBank's own validators then
+    enforce spawn-consistency on construction: the stored draw-seed lists must
+    equal `spawn_draw_seeds(seed_base, n)` for both axes.
+
+    Args:
+        tensors: DGPBankTensors from `load_dgp_bank_safetensors(path)`.
+
+    Returns:
+        DGPBank with `.clean [N_trajectory, T, D]` and
+        `.noise_draws [N_noise, T, D]` taken verbatim from the artifact.
+
+    Example:
+        >>> artifact = load_dgp_bank_safetensors("dgp_bank.safetensors")
+        >>> bank = dgp_bank_from_tensors(artifact)
+        >>> bank.name, bank.noise_kind
+        ('ou', 'gaussian')
+    """
+    metadata = tensors.metadata
+
+    def required_metadata(key: str) -> str:
+        if key not in metadata:
+            raise ValueError(
+                f"{tensors.path} metadata is missing {key!r}; dgp_bank_from_tensors "
+                "needs the full serie metadata header (source_name, noise_kind, "
+                "is_stochastic, seed bases, spawned draw-seed lists)"
+            )
+        return metadata[key]
+
+    return DGPBank(
+        name=required_metadata("source_name"),
+        trajectory_seed_base=int(json.loads(required_metadata("trajectory_seed_base"))),
+        noise_seed_base=int(json.loads(required_metadata("noise_seed_base"))),
+        trajectory_draw_seeds=tuple(
+            int(seed) for seed in json.loads(required_metadata("trajectory_draw_seeds"))
+        ),
+        noise_draw_seeds=tuple(int(seed) for seed in json.loads(required_metadata("noise_draw_seeds"))),
+        clean=np.ascontiguousarray(tensors.clean, dtype=np.float32),
+        noise_draws=np.ascontiguousarray(tensors.noise, dtype=np.float32),
+        feature_names=tensors.feature_names,
+        is_stochastic=bool(json.loads(required_metadata("is_stochastic"))),
+        noise_kind=required_metadata("noise_kind"),
+    )
+
+
 def export_dgp_bank_files(
     bank: DGPBank,
     out_dir: str | Path,
@@ -449,7 +742,7 @@ def export_dgp_bank_files(
     draw_design: DrawDesign | str = DrawDesign.AUTO,
     overwrite: bool = False,
 ) -> dict[str, object]:
-    """Write DGP-bank clean/noise arrays, optional noisy cells, and a manifest.
+    """Write DGP-bank clean/noise arrays, optional noisy cells, and file metadata.
 
     This is an explicit audit/export path. Normal `build_dgp_bank(...)` stays
     memory-only; call this when you want generated trajectories on disk for
@@ -459,17 +752,38 @@ def export_dgp_bank_files(
     - `clean.npy` / `clean.csv` / `clean.ipc` / `clean.parquet`: clean trajectories
     - `noise_draws.npy` / `noise_draws.csv` / `noise_draws.ipc` / `noise_draws.parquet`: frozen noise draws
     - `noisy/*`: optional cells selected by `draw_design`
-    - `manifest.json`: provenance and relative file names
+    - `manifest.json`: provenance and relative file names for every export folder
+    - `dgp_bank.safetensors`: one grouped tensor artifact when
+      `array_format="safetensors"` or `array_format="all"`
     """
-    if array_format not in {"npy", "csv", "ipc", "parquet", "table", "all"}:
-        raise ValueError("array_format must be 'npy', 'csv', 'ipc', 'parquet', 'table', or 'all'")
+    if array_format not in {"npy", "csv", "ipc", "parquet", "table", "safetensors", "all"}:
+        raise ValueError("array_format must be 'npy', 'csv', 'ipc', 'parquet', 'table', 'safetensors', or 'all'")
     design = DrawDesign(draw_design)
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     sigma_values = tuple(float(sigma) for sigma in sigmas)
+    if array_format == "safetensors":
+        manifest = export_dgp_bank_safetensors(
+            bank,
+            out / "dgp_bank.safetensors",
+            sigmas=sigma_values,
+            draw_design=design,
+            overwrite=overwrite,
+        )
+        _write_json(out / "manifest.json", manifest, overwrite=overwrite)
+        return manifest
 
     files: dict[str, object] = {}
+    if array_format == "all":
+        export_dgp_bank_safetensors(
+            bank,
+            out / "dgp_bank.safetensors",
+            sigmas=sigma_values,
+            draw_design=design,
+            overwrite=overwrite,
+        )
+        files["safetensors"] = "dgp_bank.safetensors"
     if _wants_format(array_format, "npy"):
         files["clean_npy"] = Path(
             _write_npy(out / "clean.npy", bank.clean, overwrite=overwrite)

@@ -737,7 +737,7 @@ to_learn.md                     # 本地学习版，详细解释，不上传
 
 | 技能 | 做什么 | 简历写法 |
 |------|--------|---------|
-| **Rust FFI / PyO3** | 从 Python 直接调用 fern_data | "用 PyO3 构建 Python-Rust FFI 桥接，数据管线加速 10-100x" |
+| **Rust FFI / PyO3** | 从 Python 直接调用 serie-rs | "用 PyO3 构建 Python-Rust FFI 桥接，数据管线加速 10-100x" |
 | **WASM 构建** | 吸引子演示在浏览器原生运行，无需 Python | "将数值模拟编译为 WebAssembly 实现浏览器原生执行" |
 | **基准测试套件** | 在 CI 中追踪性能回归 | "维护持续性能基准与回归检测" |
 
@@ -1158,3 +1158,106 @@ ValueError，而不是段错误或静默产生 NaN。
 3. **快照测试**（30 分钟）— 对 CLI JSON 输出加 golden file
 4. **变异测试**（可选）— 对 api.py 跑一次看变异分数
 5. **模糊测试**（等 PyO3 桥接时再说）
+
+---
+
+## Part 5: study 仓库的 CI 与数据库备份（2026-07）
+
+### study 仓库的 GitHub Actions 在做什么
+
+serie 独立仓库早就有 CI（Part 1），现在 study 这个 monorepo 也有了两个
+workflow 文件：
+
+```text
+.github/workflows/ci.yml       — push / pull_request 触发，快而全
+.github/workflows/nightly.yml  — 每晚定时 + 手动触发，跑需要 torch/GPU 的重测试
+```
+
+**Job 是什么：** 一个 workflow 里可以有多个 job，每个 job 在一台独立的
+虚拟机上跑，互相并行。`ci.yml` 里有三个：
+
+```text
+rust        — cargo check（零 warning 门禁）+ nextest + 单元/快集成测试
+serie-tests — uv run pytest serie/tests（无 torch，163 个测试十几秒跑完）
+root-tests  — 根目录 tests/ 要 import torch，只能手动触发（见下）
+```
+
+**Trigger 是什么：** `on: push` 每次推送都跑；`on: schedule` 用 cron 表达式
+定时跑（nightly 是每天 03:17 UTC）；`workflow_dispatch` 是在 Actions 页面
+点按钮手动跑。root-tests 只在手动触发时跑，因为 uv.lock 锁定的 torch 是
+CUDA 版（wheel 约 915 MB，装完约 7 GB）——每次 push 都下载太浪费。
+
+**Cache 是什么：** GitHub 的运行机每次都是全新虚拟机，什么都要重装。
+`Swatinem/rust-cache` 缓存 cargo 的依赖编译产物（不缓存你自己 crate 的），
+`astral-sh/setup-uv` 的 `enable-cache` 缓存 Python wheel。没有缓存，Rust
+job 每次要从零编译整个依赖树（本地首次约 35 秒 check，CI 冷机上是几分钟）。
+
+**为什么 GPU 测试要 self-hosted runner：** GitHub 免费提供的运行机
+（`runs-on: ubuntu-latest`）没有 GPU，而 nightly 的端到端测试真的训练一个
+1-epoch 模型。`runs-on: [self-hosted, gpu]` 的意思是"只在我自己注册的、
+贴了 gpu 标签的机器上跑"。注册方法：GitHub 仓库 Settings → Actions →
+Runners → New self-hosted runner，它给你一段脚本在你的机器上跑
+（`./config.sh` 时加上 `gpu` 标签，然后 `./run.sh` 保持监听）。注册之前
+这个 workflow 无害——排队的 job 等 24 小时没等到机器就被 GitHub 自动取消。
+
+### sqlite 的 .backup 和直接 cp 文件的区别
+
+`results/fern.db` 是 WAL 模式（write-ahead log）：最近的写入先追加在旁边的
+`fern.db-wal` 文件里，之后才合并回主文件。这时候直接 `cp fern.db backup.db`
+有两个坑：
+
+```text
+1. 漏数据 — WAL 里还没合并的最新写入不在主文件里，副本缺最近的行
+2. 撕裂副本 — 如果 cp 的瞬间正好有进程在写，副本可能是半新半旧的损坏文件
+```
+
+SQLite 的 online backup API（CLI 里的 `.backup` 命令、Python 里的
+`Connection.backup()`）走的是数据库事务通道：它读到的是一个一致的快照，
+包含 WAL 里的内容，而且备份期间别的进程还能继续读写。`just db-backup`
+用的就是这个 API（这台机器没装 sqlite3 CLI，所以用 python3 标准库的
+sqlite3，同一个 API）。源库以只读方式打开，绝不会被备份动到。
+
+```bash
+just db-backup        # 备份到 backups/fern_YYYYmmdd_HHMMSS.db，打印路径和大小
+just db-backup-trim   # 只留最新 14 个快照（just db-backup-trim 30 改成留 30 个）
+```
+
+### sqlite3 CLI、Python sqlite3、uv tool 的区别
+
+这次查 `results/fern.db` 时遇到的是：Python 标准库有 `sqlite3` 模块，
+但系统没有装 `sqlite3` 这个命令行程序。
+
+**`sqlite3` CLI 是系统包，不是 uv 包。** 在这台 Debian/Ubuntu 系统上，
+全局安装命令是：
+
+```bash
+sudo apt update
+sudo apt install sqlite3
+```
+
+装好后就可以直接：
+
+```bash
+sqlite3 results/fern.db "select count(*) from runs;"
+sqlite3 results/fern.db ".schema runs"
+```
+
+**不用装系统包也能查库：** Python 3.12+ 自带一个轻量 CLI，这台机器的
+Python 3.14 可以直接用：
+
+```bash
+python3 -m sqlite3 results/fern.db "select count(*) from runs;"
+python3 -m sqlite3 results/fern.db "pragma table_info(runs);"
+```
+
+**`uv tool install sqlite-utils` 是另一回事。** 它会安装 Simon Willison 的
+`sqlite-utils` Python CLI，适合导入/导出/检查 SQLite，但不会提供名为
+`sqlite3` 的系统 shell。也就是说：
+
+```bash
+uv tool install sqlite-utils   # 得到 sqlite-utils，不是 sqlite3
+```
+
+经验规则：需要 `.schema`、`.mode column`、`.backup` 这类 SQLite shell
+命令，就装系统 `sqlite3`；只是 agent 临时查几行数据，`python3 -m sqlite3`
+或 Python 标准库脚本已经够用。

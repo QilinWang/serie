@@ -48,6 +48,7 @@ class ODESystem(StrEnum):
     # SDEs (stochastic differential equations)
     OU = auto()  # 1D Ornstein-Uhlenbeck, mean-reverting
     DOUBLEWELL = auto()  # 1D bistable potential + Brownian noise
+    LG_SSM = auto()  # D-dim matrix OU (linear Gaussian state-space), EXACT discretization
 
     # Discrete statistical processes
     SLDS = auto()  # 1D switching linear dynamical system
@@ -78,6 +79,7 @@ _STOCHASTIC_SYSTEMS: frozenset[ODESystem] = frozenset(
     {
         ODESystem.OU,
         ODESystem.DOUBLEWELL,
+        ODESystem.LG_SSM,
         ODESystem.SLDS,
         ODESystem.SEASONAL_AR,
         ODESystem.GARCH,
@@ -994,6 +996,223 @@ def garch_param_shock_spec():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LG-SSM (matrix OU / linear Gaussian state-space latent SDE)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@define(frozen=True, kw_only=True)
+class LGSSMParams:
+    """
+    LG-SSM: continuous-time linear Gaussian SDE sampled at a fixed interval dt
+    by EXACT discretization (no Euler stepping).
+
+    Roadmap: docs/new_titration/controlled_model_families_roadmap.md
+      §15.2 (matrix Ornstein-Uhlenbeck model),
+      §15.3 (damped oscillatory spectral blocks),
+      §3.5/§3.6 (controlled non-normality via eigenvector conditioning κ(V)).
+
+    Latent SDE (§15.2, with L = I_D and Q_c = q_c·I_D):
+
+      dx(t) = F x(t) dt + L dW(t)
+
+    Drift construction (§15.3 blocks assembled per §3.5):
+
+      B_c = blockdiag(F_1, …, F_m),  F_i = [[-γ_i, -ω_i], [ω_i, -γ_i]]
+      F   = V B_c V⁻¹,               V = diag(σ)·W
+
+    where W is the orthonormal DCT-II matrix and σ_j = kappa_v^{j/(D-1)}, so
+    cond₂(V) = kappa_v exactly. kappa_v = 1 gives orthogonal V → normal F;
+    kappa_v > 1 gives ill-conditioned V → non-normal F with transient
+    amplification at a FIXED spectral radius (§3.5). §3.5 pins only V's
+    conditioning, not a specific V; the diag(σ)·DCT-II realization is this
+    catalog's deterministic pin so both engines build the identical matrix.
+
+    Exact sampling at interval dt (§15.2):
+
+      x_{k+1} = A x_k + w_k,   w_k ~ N(0, Q)
+      A = exp(F·dt),   Q = ∫₀^dt exp(F s)·L Q_c Lᵀ·exp(Fᵀ s) ds   (Van Loan)
+
+    State dimension D = 2·len(gammas). |eig(A)| = exp(-γ_i·dt) is independent
+    of kappa_v — this is the "spectral radius held fixed while V's
+    conditioning varies" design.
+
+    REQUIRE: len(gammas) == len(omegas) >= 1
+    REQUIRE: gammas > 0 (stationarity: Re λ(F) < 0, §15.2)
+    REQUIRE: kappa_v >= 1
+    REQUIRE: q_c > 0
+    """
+
+    gammas: tuple[float, ...]  # Per-block damping rates γ_i (§15.3)
+    omegas: tuple[float, ...]  # Per-block angular frequencies ω_i (§15.3)
+    kappa_v: float  # Eigenvector conditioning κ(V) (§3.6 menu: 1, 5, 20, 100)
+    q_c: float  # Process-noise spectral density: L = I, Q_c = q_c·I (§15.2)
+
+
+def _lg_ssm_mixing_matrix(dim: int) -> np.ndarray:
+    """Orthonormal DCT-II matrix W, shape [dim, dim] — the deterministic
+    orthogonal mixing factor of V = diag(σ)·W.
+
+    W[k, n] = a_k·cos(π·(n + 1/2)·k / dim), a_0 = √(1/dim), a_k = √(2/dim).
+    Rows are orthonormal, so W Wᵀ = I. Closed-form cosine entries keep the
+    Python and Rust constructions bit-comparable without any RNG.
+    """
+    row = np.arange(dim, dtype=np.float64)[:, None]
+    col = np.arange(dim, dtype=np.float64)[None, :]
+    w = np.cos(np.pi * (col + 0.5) * row / dim)
+    w[0, :] *= np.sqrt(1.0 / dim)
+    w[1:, :] *= np.sqrt(2.0 / dim)
+    return w
+
+
+def lg_ssm_drift_matrix(params: LGSSMParams) -> np.ndarray:
+    """Build the LG-SSM continuous-time drift F = V B_c V⁻¹, shape [D, D].
+
+    B_c is the §15.3 block-diagonal of damped oscillatory blocks
+    [[-γ_i, -ω_i], [ω_i, -γ_i]] (eigenvalues -γ_i ± iω_i); V = diag(σ)·W with
+    cond₂(V) = kappa_v (§3.5). V⁻¹ = Wᵀ·diag(1/σ) in closed form, so no
+    numerical matrix inversion enters the construction.
+
+    Args:
+        params: LGSSMParams. D = 2·len(params.gammas).
+
+    Returns:
+        F, float64 array [D, D], eigenvalues -γ_i ± iω_i for every kappa_v.
+
+    Example:
+        >>> F = lg_ssm_drift_matrix(lg_ssm_spec().params)
+        >>> F.shape  # (8, 8)
+    """
+    if len(params.gammas) != len(params.omegas) or len(params.gammas) == 0:
+        raise ValueError(
+            f"lg_ssm requires one omega per gamma with at least one block, got "
+            f"{len(params.gammas)} gammas and {len(params.omegas)} omegas."
+        )
+    if params.kappa_v < 1.0:
+        raise ValueError(
+            f"kappa_v is a condition number and must be >= 1, got {params.kappa_v}."
+        )
+    dim = 2 * len(params.gammas)
+    b = np.zeros((dim, dim), dtype=np.float64)
+    for block_idx, (gamma, omega) in enumerate(zip(params.gammas, params.omegas, strict=True)):
+        # §15.3: F_i = [[-γ_i, -ω_i], [ω_i, -γ_i]], eigenvalues -γ_i ± iω_i.
+        b[2 * block_idx, 2 * block_idx] = -gamma
+        b[2 * block_idx, 2 * block_idx + 1] = -omega
+        b[2 * block_idx + 1, 2 * block_idx] = omega
+        b[2 * block_idx + 1, 2 * block_idx + 1] = -gamma
+    w = _lg_ssm_mixing_matrix(dim)
+    # σ_j = kappa_v^{j/(D-1)}: geometric spread from 1 to kappa_v, cond₂ = kappa_v.
+    sigma = params.kappa_v ** (np.arange(dim, dtype=np.float64) / (dim - 1))
+    # F = diag(σ)·W·B_c·Wᵀ·diag(1/σ)  — the §3.5 similarity A = V B V⁻¹ in
+    # continuous time. W first rotates B_c into a dense normal matrix, then the
+    # diagonal skew couples all directions with ratios up to kappa_v.
+    return (sigma[:, None] * w) @ b @ (w.T * (1.0 / sigma)[None, :])
+
+
+def lg_ssm_discretize_exact(params: LGSSMParams, dt: float) -> tuple[np.ndarray, np.ndarray]:
+    """Exactly discretize the LG-SSM SDE at sampling interval dt → (A, Q).
+
+    Van Loan block-matrix exponential (§15.2, [@vanloan1978computing;
+    @sarkka2019applied]): build
+
+      M = [[F, L Q_c Lᵀ], [0, -Fᵀ]] · dt,   Φ = expm(M) = [[Φ₁₁, Φ₁₂], [0, Φ₂₂]]
+
+    then A = Φ₁₁ = exp(F·dt), and Q = Φ₁₂·Aᵀ because Φ₁₂ = Q_dt·Φ₂₂ with
+    Φ₂₂ = exp(-Fᵀ·dt) and Φ₂₂⁻¹ = exp(Fᵀ·dt) = Aᵀ — so no matrix inversion.
+
+    Args:
+        params: LGSSMParams (defines F and q_c).
+        dt: Sampling interval Δ > 0.
+
+    Returns:
+        (A, Q): float64 arrays [D, D]. A is the exact transition matrix,
+        Q the exact process-noise covariance over one interval.
+
+    Example:
+        >>> A, Q = lg_ssm_discretize_exact(lg_ssm_spec().params, dt=1.0)
+        >>> np.max(np.abs(np.linalg.eigvals(A)))  # 0.95 for the preset
+    """
+    try:
+        from scipy.linalg import expm
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "lg_ssm exact discretization needs scipy (scipy.linalg.expm). "
+            "Install scipy in the environment running serie."
+        ) from exc
+
+    if dt <= 0.0:
+        raise ValueError(f"lg_ssm sampling interval dt must be > 0, got {dt}.")
+    if params.q_c <= 0.0:
+        raise ValueError(
+            f"q_c must be > 0 for a nondegenerate process-noise covariance, got {params.q_c}."
+        )
+    f = lg_ssm_drift_matrix(params)
+    dim = f.shape[0]
+    diffusion = params.q_c * np.eye(dim)  # L Q_c Lᵀ with L = I, Q_c = q_c·I
+    van_loan_block = np.zeros((2 * dim, 2 * dim), dtype=np.float64)
+    van_loan_block[:dim, :dim] = f
+    van_loan_block[:dim, dim:] = diffusion
+    van_loan_block[dim:, dim:] = -f.T
+    phi = expm(van_loan_block * dt)
+    a = phi[:dim, :dim]
+    q = phi[:dim, dim:] @ a.T
+    return a, q
+
+
+def lg_ssm_spec(
+    *,
+    periods=(12.0, 24.0, 48.0, 96.0),
+    spectral_radius=0.95,
+    kappa_v=1.0,
+    q_c=None,
+    steps=25000,
+    dt=1.0,
+    burn_in=0,
+):
+    """Main-benchmark LG-SSM preset: D = 8 latent dims (§2.5 main-benchmark
+    state dimension 8–32), one damped oscillatory block per period.
+
+    - periods: cycle lengths in SAMPLING STEPS (§3.6 menu: 12, 24, 48, 96);
+      ω_i = 2π/(period_i·dt).
+    - spectral_radius: per-step decay |eig(A)| = exp(-γ·dt); equal damping
+      across blocks holds ρ(A) fixed while kappa_v varies (§3.7 scenario 1
+      uses ρ(A) = 0.95; scenario 4's transient-risk setting is ρ(A) = 0.9
+      with non-normal V).
+    - kappa_v: eigenvector conditioning κ(V) (§3.6 menu: 1, 5, 20, 100).
+      Default 1.0 = normal drift; raise it for controlled non-normality.
+    - q_c: process-noise spectral density. Default None resolves to 2γ, which
+      standardizes the kappa_v = 1 stationary covariance to the identity
+      (baseline per-channel std 1.0, §2.5 "standardize baseline marginal
+      scales before applying perturbations").
+    """
+    from .specs import TrajectorySpec
+
+    gamma = -float(np.log(spectral_radius)) / dt
+    resolved_q_c = 2.0 * gamma if q_c is None else q_c
+    dim = 2 * len(periods)
+    return TrajectorySpec(
+        system=ODESystem.LG_SSM,
+        params=LGSSMParams(
+            gammas=(gamma,) * len(periods),
+            omegas=tuple(2.0 * np.pi / (float(period) * dt) for period in periods),
+            kappa_v=kappa_v,
+            q_c=resolved_q_c,
+        ),
+        dt=dt,
+        steps=steps,
+        burn_in=burn_in,
+        dim=dim,
+        method="euler",  # dummy for discrete dispatch (stepping is exact); schema compat like slds
+        x0=(0.0,) * dim,
+    )
+
+
+def lg_ssm_small_spec(*, kappa_v=1.0, steps=25000):
+    """Small/debug LG-SSM preset: D = 4 (§2.5 small/debug state dimension
+    2–4), periods 12 and 24 steps, otherwise identical to lg_ssm_spec."""
+    return lg_ssm_spec(periods=(12.0, 24.0), kappa_v=kappa_v, steps=steps)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # KS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1021,8 +1240,23 @@ class KSParams:
     dealias: bool = True  # Whether to apply 2/3-rule dealiasing
 
 
-def ks_spec(*, nx=64, Lx=22.0, nu=1.0, steps=25000, dt=1e-2, burn_in=0):
+def ks_spec(*, nx=64, Lx=22.0, nu=1.0, steps=27500, dt=1e-2, burn_in=2500):
     from .specs import TrajectorySpec
+
+    # CHG (2026-07-01, user-approved scientific fix): x0 was zeros(nx), which
+    # is a fixed point of the KS flow — ETDRK4 kept the trajectory identically
+    # zero, so this preset generated a degenerate all-zero series. Seed field
+    # is now the standard Kassam–Trefethen (2005) initial condition
+    # generalized to domain length Lx:
+    #     u0(x) = cos(2πx/Lx) · (1 + sin(2πx/Lx)),   x_j = j·Lx/nx
+    # (reduces exactly to their cos(x/16)(1+sin(x/16)) at Lx = 32π).
+    # burn_in=2500 (t = 25) discards the smooth-IC transient into the chaotic
+    # attractor; steps grew by the same 2500 so the usable output length stays
+    # 25001 rows (t ≈ 250). Shock timing is unaffected: ShockEvent t_start is
+    # relative to the post-burn-in trajectory (integrators.py shock_step).
+    grid_x = np.arange(nx, dtype=np.float64) * (Lx / nx)
+    phase = 2.0 * np.pi * grid_x / Lx
+    seed_field = np.cos(phase) * (1.0 + np.sin(phase))
 
     return TrajectorySpec(
         system=ODESystem.KS,
@@ -1032,7 +1266,7 @@ def ks_spec(*, nx=64, Lx=22.0, nu=1.0, steps=25000, dt=1e-2, burn_in=0):
         burn_in=burn_in,
         dim=nx,
         method="etdrk4",
-        x0=tuple([0.0] * nx),
+        x0=tuple(float(v) for v in seed_field),
     )
 
 
@@ -1108,6 +1342,7 @@ SystemParams = (
     | LogisticParams
     | OUParams
     | DoubleWellParams
+    | LGSSMParams
     | SLDSParams
     | SeasonalARParams
     | GARCHParams
@@ -1233,7 +1468,10 @@ SYSTEMS: dict[str, SystemSpec] = {
 }
 
 
-DISCRETE_SYSTEMS = {"slds", "seasonal_ar", "garch"}
+# lg_ssm is a continuous-time SDE, but its generator is an exact stepwise
+# recurrence (A, Q from the Van Loan discretization), so it dispatches with
+# the discrete statistical simulators rather than the Euler-Maruyama path.
+DISCRETE_SYSTEMS = {"slds", "seasonal_ar", "garch", "lg_ssm"}
 
 # String name -> preset function (for build_dgp_bank("lorenz") convenience)
 _ALL_PRESETS = {
@@ -1258,6 +1496,8 @@ _ALL_PRESETS = {
     "doublewell": doublewell_spec,
     "doublewell_param_shock": doublewell_param_shock_spec,
     "doublewell_switch": doublewell_switch_spec,
+    "lg_ssm": lg_ssm_spec,
+    "lg_ssm_small": lg_ssm_small_spec,
     "slds": slds_spec,
     "slds_moe": slds_moe_spec,
     "slds_param_shock": slds_param_shock_spec,

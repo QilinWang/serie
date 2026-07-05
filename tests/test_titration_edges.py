@@ -15,6 +15,7 @@ These tests use the public SERIE names (build_dgp_bank / inject_noise / sigma).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 from attrs import evolve
@@ -34,11 +35,12 @@ from serie import (
     TrajectorySpec,
     __version__,
     export_dgp_bank_files,
+    load_dgp_bank_safetensors,
     build_dgp_bank,
     build_empirical_dgp_bank,
     inject_noise,
 )
-from serie.api import iter_cells
+from serie.api import dgp_bank_from_tensors, export_dgp_bank_safetensors, iter_cells
 from serie.catalog import LorenzParams
 from serie.specs import spawn_draw_seeds
 
@@ -596,6 +598,8 @@ class TestProvenance:
 
         assert manifest["schema"] == "serie.dgp_bank_file_export.v1"
         assert manifest["array_format"] == "all"
+        assert manifest["files"]["safetensors"] == "dgp_bank.safetensors"
+        assert (out / "dgp_bank.safetensors").exists()
         np.testing.assert_array_equal(np.load(out / "clean.npy"), bank.clean)
         np.testing.assert_array_equal(np.load(out / "noise_draws.npy"), bank.noise_draws)
         clean_csv = pl.read_csv(out / "clean.csv")
@@ -618,6 +622,68 @@ class TestProvenance:
         assert on_disk["noisy"][0]["cell_tag"] == entry["cell_tag"]
         with pytest.raises(FileExistsError):
             export_dgp_bank_files(bank, out)
+
+    def test_export_dgp_bank_files_writes_grouped_safetensors_and_manifest(self, tmp_path):
+        bank = build_dgp_bank(small_lorenz(), seed=0, verbose=False)
+        out = tmp_path / "grouped"
+        manifest = export_dgp_bank_files(bank, out, sigmas=(0.25,), array_format="safetensors")
+
+        assert manifest["schema"] == "serie.dgp_bank_safetensors.v1"
+        assert manifest["array_format"] == "safetensors"
+        assert manifest["files"] == {"safetensors": "dgp_bank.safetensors"}
+        assert (out / "manifest.json").exists()
+        assert (out / "dgp_bank.safetensors").exists()
+
+        artifact = load_dgp_bank_safetensors(out / "dgp_bank.safetensors")
+        np.testing.assert_array_equal(artifact.clean, bank.clean)
+        np.testing.assert_array_equal(artifact.noise, bank.noise_draws)
+        assert artifact.feature_names == bank.feature_names
+
+        noisy_entry = manifest["noisy"][0]
+        tensor_name = noisy_entry["tensor"]
+        assert tensor_name in artifact.tensors
+        expected = bank.build_observed_series(noise_level=0.25)
+        np.testing.assert_array_equal(artifact.tensors[tensor_name], expected)
+
+        on_disk = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+        assert on_disk["files"] == manifest["files"]
+        assert on_disk["noisy"][0]["tensor"] == tensor_name
+        with pytest.raises(FileExistsError):
+            export_dgp_bank_files(bank, out, array_format="safetensors")
+
+    def test_dgp_bank_round_trips_through_safetensors_to_dgp_bank(self, tmp_path):
+        # export → load → convert must rebuild the SAME bank: this is the
+        # contract the Rust-generated bank handoff relies on (the serie-rs
+        # writer emits the same header, so a bank from either engine passes
+        # DGPBank's spawn-consistency validators on load).
+        bank = build_dgp_bank(small_ou(), seed=42, n_trajectory_draws=2, n_noise_draws=3, verbose=False)
+        path = tmp_path / "dgp_bank.safetensors"
+        export_dgp_bank_safetensors(bank, path)
+
+        rebuilt = dgp_bank_from_tensors(load_dgp_bank_safetensors(path))
+
+        assert rebuilt.name == bank.name
+        assert rebuilt.trajectory_seed_base == bank.trajectory_seed_base
+        assert rebuilt.noise_seed_base == bank.noise_seed_base
+        assert rebuilt.trajectory_draw_seeds == bank.trajectory_draw_seeds
+        assert rebuilt.noise_draw_seeds == bank.noise_draw_seeds
+        assert rebuilt.feature_names == bank.feature_names
+        assert rebuilt.is_stochastic == bank.is_stochastic
+        assert rebuilt.noise_kind == bank.noise_kind
+        np.testing.assert_array_equal(rebuilt.clean, bank.clean)
+        np.testing.assert_array_equal(rebuilt.noise_draws, bank.noise_draws)
+
+    def test_dgp_bank_from_tensors_requires_the_full_header(self, tmp_path):
+        bank = build_dgp_bank(small_ou(), seed=42, verbose=False)
+        path = tmp_path / "dgp_bank.safetensors"
+        export_dgp_bank_safetensors(bank, path)
+        artifact = load_dgp_bank_safetensors(path)
+        stripped = dataclasses.replace(
+            artifact,
+            metadata={k: v for k, v in artifact.metadata.items() if k != "trajectory_draw_seeds"},
+        )
+        with pytest.raises(ValueError, match="trajectory_draw_seeds"):
+            dgp_bank_from_tensors(stripped)
 
     def test_public_metadata_is_immutable(self):
         bank = build_dgp_bank(small_lorenz(), seed=0, verbose=False)

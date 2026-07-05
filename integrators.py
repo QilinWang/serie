@@ -57,10 +57,12 @@ from .catalog import (
     DoubleWellParams,
     GARCHParams,
     KSParams,
+    LGSSMParams,
     Lorenz96Params,
     OUParams,
     SLDSParams,
     SeasonalARParams,
+    lg_ssm_discretize_exact,
 )
 from .specs import ShockType, TrajectorySpec
 from attrs import AttrsInstance, astuple
@@ -100,16 +102,25 @@ def _transition_field_names(params: AttrsInstance) -> tuple[str, ...]:
     Examples:
     - Lorenz96 `forcing` can move, but not lattice shape
     - SeasonalAR `S` stays fixed
-    - KS `nx` and `dealias` stay fixed
+    - KS `nx`, `dealias`, and `Lx` stay fixed
     """
     if isinstance(params, Lorenz96Params):
         return ("forcing",)
     if isinstance(params, SeasonalARParams):
         return ("phi", "sigma", "a0", "amp_drift")
     if isinstance(params, KSParams):
-        return ("nu", "Lx")
+        # CHG (2026-07-02, user-approved): Lx removed from the transition set.
+        # The ETDRK4 runner builds its spectral grid k from Lx ONCE and
+        # build_coeffs() rebuilds coefficients from nu only, so an Lx change
+        # would silently never take effect. Domain length is structural for a
+        # fixed-nx grid: only the viscosity nu may move.
+        return ("nu",)
     if isinstance(params, DiagonalParams):
         return ("eigenvalues",)
+    if isinstance(params, LGSSMParams):
+        # Block count (len of gammas/omegas) is structural; the per-block
+        # rates/frequencies and the scalar knobs may move.
+        return ("gammas", "omegas", "kappa_v", "q_c")
     return tuple(field.name for field in attr.fields(type(params)))
 
 
@@ -117,6 +128,15 @@ def _transition_field_values(params: AttrsInstance) -> tuple[float, ...]:
     """Ordered numeric values that actually participate in a transition."""
     if isinstance(params, DiagonalParams):
         return tuple(float(value) for value in params.eigenvalues)
+    if isinstance(params, LGSSMParams):
+        # Flattened as [gammas…, omegas…, kappa_v, q_c] — the same order the
+        # Rust SystemParams::as_f64_vec uses for LgSsmParams.
+        return (
+            *(float(value) for value in params.gammas),
+            *(float(value) for value in params.omegas),
+            float(params.kappa_v),
+            float(params.q_c),
+        )
 
     return tuple(
         float(getattr(params, field_name)) for field_name in _transition_field_names(params)
@@ -130,6 +150,15 @@ def _params_with_transition_field_values(
     """Rebuild params from transition values while preserving structural fields."""
     if isinstance(params, DiagonalParams):
         return attr.evolve(params, eigenvalues=tuple(float(value) for value in transition_values))
+    if isinstance(params, LGSSMParams):
+        n_blocks = (len(transition_values) - 2) // 2
+        return attr.evolve(
+            params,
+            gammas=tuple(float(value) for value in transition_values[:n_blocks]),
+            omegas=tuple(float(value) for value in transition_values[n_blocks : 2 * n_blocks]),
+            kappa_v=float(transition_values[2 * n_blocks]),
+            q_c=float(transition_values[2 * n_blocks + 1]),
+        )
 
     field_names = _transition_field_names(params)
     if len(field_names) != len(transition_values):
@@ -236,11 +265,21 @@ class StepShockSchedule:
             )
         if n_inserts <= 0:
             raise ValueError(f"n_inserts must be >= 1, got {n_inserts}")
+        # CHG (2026-07-01, ruling 4 applied to the constructor path too): this
+        # used to silently clamp n_inserts to the window, quietly compiling a
+        # different transition than the caller asked for. One concept, one
+        # behavior: raise, matching the generate path and Rust.
+        if int(n_inserts) > total_transition_steps:
+            raise ValueError(
+                f"param transition asks for {n_inserts} scheduled updates, but the "
+                f"window steps {start_step}..{end_step} allow only {total_transition_steps}. "
+                f"Widen the [start_step, end_step] window or lower n_inserts."
+            )
 
         param_sets = [before]
         events: list[ParamChangeEvent] = []
 
-        n_insert_points = min(int(n_inserts), total_transition_steps)
+        n_insert_points = int(n_inserts)
         transition_step_offsets = [
             (insert_idx * total_transition_steps) // n_insert_points
             for insert_idx in range(1, n_insert_points + 1)
@@ -519,6 +558,16 @@ def _run_ks_etdrk4(
             elif isinstance(e, ParamChangeEvent):
                 assert schedule is not None
                 p_next = cast(KSParams, schedule.param_sets[e.param_set_idx])
+                # CHG (2026-07-02, user-approved guard): the spectral grid k and
+                # dealias mask were built from the ORIGINAL Lx/nx/dealias and
+                # never rebuilt, so a change to any of them would silently not
+                # take effect. Fail loudly instead.
+                if (p_next.Lx, p_next.nx, p_next.dealias) != (Lx, nx, dealias):
+                    raise ValueError(
+                        "KS param transitions may only change nu: Lx/nx/dealias are "
+                        f"structural (grid built once). Got Lx={p_next.Lx} nx={p_next.nx} "
+                        f"dealias={p_next.dealias}, expected Lx={Lx} nx={nx} dealias={dealias}."
+                    )
                 E, E2, Q, f1, f2, f3 = build_coeffs(p_next.nu)
             event_idx += 1
 
@@ -584,10 +633,16 @@ def _run_slds(
         # Transition regime
         if z == 1:
             z = 1 if rng.random() < p.p11 else 2
-            A, Q = p.A1, p.Q1
         else:
             z = 2 if rng.random() < p.p22 else 1
-            A, Q = p.A2, p.Q2
+
+        # CHG (user-approved 2026-07-01): dynamics use the NEWLY drawn regime,
+        # x_t = A_{z_t}·x_{t-1} + sqrt(Q_{z_t})·η_t, matching the SLDSParams
+        # docstring. Previously the pre-transition regime's (A, Q) stepped, so
+        # a switch drawn at step t only took effect at t+1. slds /
+        # slds_param_shock / slds_switch trajectories differ from all pre-fix
+        # runs.
+        A, Q = (p.A1, p.Q1) if z == 1 else (p.A2, p.Q2)
 
         # Evolve
         x = A * x + rng.normal(0.0, np.sqrt(Q))
@@ -676,6 +731,63 @@ def _run_garch(
     return traj  # (T,2)
 
 
+def _run_lg_ssm(
+    x0: np.ndarray,
+    steps: int,
+    dt: float,
+    params: LGSSMParams,
+    seed: int,
+    schedule: StepShockSchedule | None,
+) -> np.ndarray:
+    """Run the LG-SSM by exact discretization (roadmap §15.2):
+
+      x_{k+1} = A·x_k + chol(Q)·ε_k,   ε_k ~ N(0, I_D)
+
+    A = exp(F·dt) and Q come from lg_ssm_discretize_exact (Van Loan block
+    exponential); this loop performs NO Euler stepping. One
+    rng.standard_normal(D) block per step from a single Generator, matching
+    _run_sde_py's draw convention.
+
+    A ParamChangeEvent swaps the drift/diffusion params, so the discretized
+    (A, Q, chol(Q)) are rebuilt exactly at the event step.
+    """
+    rng = np.random.default_rng(seed)
+    p = params
+    dim = 2 * len(p.gammas)
+    A, Q = lg_ssm_discretize_exact(p, dt)
+    chol_q = np.linalg.cholesky(Q)
+
+    traj = np.empty((steps + 1, dim), dtype=np.float64)
+    x = x0.copy()
+    traj[0] = x
+    events = schedule.events if schedule is not None else ()
+    event_idx = 0
+
+    for t in range(1, steps + 1):
+        # Apply all events scheduled for this step.
+        while event_idx < len(events) and events[event_idx].step == t:
+            e = events[event_idx]
+            if isinstance(e, StatePerturbEvent):
+                x = x.copy()
+                x[e.state_idx] += e.eps
+            elif isinstance(e, ParamChangeEvent):
+                assert schedule is not None
+                p = cast(LGSSMParams, schedule.param_sets[e.param_set_idx])
+                if 2 * len(p.gammas) != dim:
+                    raise ValueError(
+                        f"lg_ssm param shock must keep the block count: state dim is {dim}, "
+                        f"shocked params imply {2 * len(p.gammas)}."
+                    )
+                A, Q = lg_ssm_discretize_exact(p, dt)
+                chol_q = np.linalg.cholesky(Q)
+            event_idx += 1
+
+        x = A @ x + chol_q @ rng.standard_normal(dim)
+        traj[t] = x
+
+    return traj
+
+
 # =============================================================================
 # Unified Configuration
 # =============================================================================
@@ -740,12 +852,26 @@ def _generate_discrete_pure(
     x0: np.ndarray,
     system: str,
     params: AttrsInstance,
+    dt: float,
     seed: int,
     schedule: StepShockSchedule | None,
 ) -> np.ndarray:
-    """Generate discrete system trajectory with explicit inputs (no self)."""
+    """Generate discrete system trajectory with explicit inputs (no self).
+
+    dt is the real sampling interval for lg_ssm (exact discretization); the
+    index-stepped simulators (slds/seasonal_ar/garch) ignore it.
+    """
     active_params = schedule.param_sets[0] if schedule else params
 
+    if system == "lg_ssm":
+        return _run_lg_ssm(
+            x0=x0,
+            steps=total_steps,
+            dt=dt,
+            params=cast(LGSSMParams, active_params),
+            seed=seed,
+            schedule=schedule,
+        )
     if system == "slds":
         return _run_slds(
             x0=x0,
@@ -903,6 +1029,7 @@ def _generate_trajectory_pure(
             x0=x0,
             system=system,
             params=params,
+            dt=dt,
             seed=seed,
             schedule=schedule,
         )
@@ -966,7 +1093,10 @@ def generate_from_trajectory_spec(
         dim = int(cast(KSParams, params_obj).nx)
     elif system in DISCRETE_SYSTEMS:
         kind = "discrete"
-        dim = 2 if system == "garch" else 1
+        if system == "lg_ssm":
+            dim = 2 * len(cast(LGSSMParams, params_obj).gammas)
+        else:
+            dim = 2 if system == "garch" else 1
     else:
         spec = SYSTEMS[system]
         kind = spec.kind
@@ -1010,7 +1140,16 @@ def generate_from_trajectory_spec(
                     # Ensure a non-empty transition window after float->int conversion.
                     transition_end_step = min(total_steps, max(shock_step + 1, shock_end_step))
                     total_transition_steps = transition_end_step - shock_step
-                    n_insert_points = min(int(event.n_inserts), total_transition_steps)
+                    # CHG (user-approved 2026-07-01): raise instead of silently
+                    # clamping n_inserts to the window (Rust already errors here).
+                    if int(event.n_inserts) > total_transition_steps:
+                        raise ValueError(
+                            f"param transition asks for {int(event.n_inserts)} scheduled updates, "
+                            f"but the window steps {shock_step}..{transition_end_step} allow only "
+                            f"{total_transition_steps}. Widen the [t_start, t_end] window or "
+                            f"lower n_inserts."
+                        )
+                    n_insert_points = int(event.n_inserts)
                     transition_step_offsets = [
                         (insert_idx * total_transition_steps) // n_insert_points
                         for insert_idx in range(1, n_insert_points + 1)

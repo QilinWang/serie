@@ -3,7 +3,7 @@
 Use this file to orient coding agents that need to operate the installed
 `serie` command. Keep it short. Human onboarding belongs in `README.md`;
 maintainer and release notes live outside this package repo in
-`../docs/dev/serie_release/developer.md`.
+`../docs/serie_release/developer.md`.
 
 ## What SERIE Does
 
@@ -58,7 +58,9 @@ Useful options:
 - `--sigma-scale unit|train_std`: raw unit noise or train-std-scaled noise.
 - `--partition`: split convention, such as `p70_20_10`.
 - `--out`: write artifacts under a stable `<source>_<cell-hash>` child directory.
-- `--array-format none|npy|csv|ipc|parquet|table|all`: choose array outputs.
+- `--array-format none|npy|csv|ipc|parquet|table|safetensors|all`: choose array outputs.
+  `safetensors` writes one grouped `dgp_bank.safetensors`; every export folder
+  still writes `manifest.json` as the file index.
 - `--plot none|timeseries|attractor|both`: choose figure outputs.
 
 Example with files:
@@ -97,8 +99,8 @@ When interpreting outputs:
 - stochastic sources default to paired trajectory/noise draws by ordinal.
 - split statistics are train-only; do not compute scale from val/test rows.
 
-Do not reintroduce old public names like `prepare` or `titrate`. Retired docs
-may still contain them.
+Do not reintroduce old public names like `prepare` or `titrate`. Deleted or
+retired docs may contain them in history; do not recreate those docs.
 
 ## If Editing Code
 

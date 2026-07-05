@@ -331,6 +331,8 @@ class TestPresets:
             lorenz96_spec,
             ou_spec,
             doublewell_spec,
+            lg_ssm_spec,
+            lg_ssm_small_spec,
             slds_spec,
             seasonal_ar_spec,
             garch_spec,
@@ -345,6 +347,8 @@ class TestPresets:
             lorenz96_spec,
             ou_spec,
             doublewell_spec,
+            lg_ssm_spec,
+            lg_ssm_small_spec,
             slds_spec,
             seasonal_ar_spec,
             garch_spec,
@@ -483,16 +487,29 @@ class TestGenerateFromTrajectorySpec:
         from serie.catalog import ks_spec
         from serie.integrators import generate_from_trajectory_spec
 
+        # CHG: the preset default is now burn_in=2500; this short e2e case
+        # overrides steps, so it must override burn_in too.
         nx = 32
         x = np.arange(nx, dtype=np.float64)
         spec = evolve(
-            ks_spec(nx=nx, steps=200, dt=1e-2),
+            ks_spec(nx=nx, steps=200, dt=1e-2, burn_in=0),
             x0=tuple(0.1 * np.cos(2.0 * np.pi * x / nx)),
         )
         traj = generate_from_trajectory_spec(spec, seed=42, dtype=np.float64)
         assert traj.shape == (201, nx)
         assert np.all(np.isfinite(traj))
         assert float(traj.std()) > 0.01
+
+    def test_ks_preset_seed_field_is_not_degenerate(self):
+        # Pins the 2026-07-01 scientific fix: x0=zeros is a fixed point of the
+        # KS flow, so the old preset generated an identically zero series. The
+        # default seed field must be non-zero with the Kassam–Trefethen shape.
+        from serie.catalog import ks_spec
+
+        spec = ks_spec()
+        x0 = np.asarray(spec.x0)
+        assert float(np.abs(x0).max()) > 0.5
+        assert spec.burn_in > 0
 
     def test_slds_e2e(self):
         from serie.catalog import slds_spec
@@ -516,3 +533,279 @@ class TestGenerateFromTrajectorySpec:
         traj = generate_from_trajectory_spec(spec, seed=42, dtype=np.float64)[:, 0]
         zero_fraction = float(np.isclose(traj[1:], 0.0, atol=0.0).mean())
         assert zero_fraction == 0.5
+
+    def test_slds_switch_drawn_at_step_t_drives_step_t(self):
+        from serie.catalog import slds_spec
+        from serie.integrators import generate_from_trajectory_spec
+
+        # Regime-timing pin (user-approved 2026-07-01): the regime drawn at
+        # step t drives the dynamics at step t itself, x_t = A_{z_t}·x_{t-1}.
+        # Rig: seed chosen so the initial coin flip starts in regime 1
+        # (premise asserted below), p11=0 forces an immediate 1→2 transition
+        # at t=1, p22=1 keeps regime 2, and Q1=Q2=0 removes noise. New
+        # convention: x_1 = A2·x_0 = 0. The pre-fix convention stepped with
+        # the pre-transition regime and gave x_1 = A1·x_0 = 0.9.
+        seed = 2
+        assert np.random.default_rng(seed).random() < 0.5, "premise: initial regime must be 1"
+
+        spec = slds_spec(A1=0.9, Q1=0.0, A2=0.0, Q2=0.0, p11=0.0, p22=1.0, steps=3)
+        spec = evolve(spec, x0=(1.0,))
+        traj = generate_from_trajectory_spec(spec, seed=seed, dtype=np.float64)[:, 0]
+
+        assert traj[0] == 1.0
+        assert traj[1] == 0.0, "switch drawn at step 1 must drive step 1 itself"
+        assert np.all(traj[1:] == 0.0)
+
+    def test_param_transition_rejects_more_inserts_than_window_steps(self):
+        from serie.catalog import lorenz_spec
+        from serie.integrators import generate_from_trajectory_spec
+
+        # A stepped transition whose window collapses to 1 step gap cannot
+        # honor n_inserts=5. This must raise (not silently clamp): steps=100,
+        # t_start=0.5, t_end=0.5001 → window steps 50..51 → 1 gap < 5.
+        spec = evolve(
+            lorenz_spec(steps=100),
+            shocks=ShockSchedule.single(
+                ShockEvent.params_stepped_transition(
+                    params_after=LorenzParams(sigma=10.0, rho=35.0, beta=8.0 / 3.0),
+                    t_start=0.5,
+                    t_end=0.5001,
+                    n_inserts=5,
+                )
+            ),
+        )
+        with pytest.raises(ValueError, match="asks for 5 scheduled updates"):
+            generate_from_trajectory_spec(spec, seed=0)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LG-SSM scientific validation (roadmap §15.2 / §15.3 / §3.5)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestLGSSM:
+    """LG-SSM exact-discretization family, validated before the Rust mirror.
+
+    The four designed checks:
+      (a) stationary covariance of a long trajectory solves the discrete
+          Lyapunov equation P = A·P·Aᵀ + Q (roadmap §3.4 / §22.2 state-space);
+      (b) the Van Loan Q equals brute-force numerical integration of the
+          covariance integral ∫₀^dt e^{Fs}·L Q_c Lᵀ·e^{Fᵀs} ds (§15.2 / §22.2
+          continuous-time SDE);
+      (c) with ill-conditioned V at FIXED spectral radius, transient
+          amplification G_K(A) = max_k ‖Aᵏ‖₂ exceeds the normal case while
+          both decay asymptotically (§3.5, transient-growth diagnostic);
+      (d) determinism and draw design match the other stochastic sources.
+    """
+
+    def test_lg_ssm_e2e(self):
+        from serie.catalog import lg_ssm_spec
+
+        spec = lg_ssm_spec(steps=1000)
+        traj = generate_from_trajectory_spec(spec, seed=42)
+        assert traj.shape == (1001, 8)
+        assert np.all(np.isfinite(traj))
+        assert float(traj.std()) > 0.1
+
+    def test_lg_ssm_spectral_radius_fixed_across_kappa(self):
+        # The controlled non-normality design (§3.5): |eig(A)| = exp(-γ·dt)
+        # is independent of kappa_v, so ρ(A) stays pinned while V's
+        # conditioning varies over the §3.6 menu.
+        from serie.catalog import lg_ssm_discretize_exact, lg_ssm_spec
+
+        for kappa_v in (1.0, 5.0, 20.0, 100.0):
+            spec = lg_ssm_spec(kappa_v=kappa_v)
+            A, _ = lg_ssm_discretize_exact(spec.params, spec.dt)
+            rho = float(np.max(np.abs(np.linalg.eigvals(A))))
+            assert abs(rho - 0.95) < 1e-12, f"kappa_v={kappa_v}: rho={rho}"
+
+    def test_lg_ssm_discretization_matches_closed_form_normal_case(self):
+        # kappa_v=1 admits closed forms that validate the Van Loan route
+        # independently: A = W·e^{B_c·dt}·Wᵀ with e^{B_c·dt} block-diagonal of
+        # e^{-γ·dt}·R(ω·dt) rotations, and Q = q_c·(1 - e^{-2γ·dt})/(2γ)·I
+        # (each §15.3 block is normal with F + Fᵀ = -2γ·I).
+        from serie.catalog import (
+            _lg_ssm_mixing_matrix,
+            lg_ssm_discretize_exact,
+            lg_ssm_spec,
+        )
+
+        spec = lg_ssm_spec()
+        p = spec.params
+        dt = spec.dt
+        A, Q = lg_ssm_discretize_exact(p, dt)
+
+        dim = 2 * len(p.gammas)
+        e_b_dt = np.zeros((dim, dim))
+        for i, (gamma, omega) in enumerate(zip(p.gammas, p.omegas, strict=True)):
+            decay = np.exp(-gamma * dt)
+            c, s = np.cos(omega * dt), np.sin(omega * dt)
+            e_b_dt[2 * i, 2 * i] = decay * c
+            e_b_dt[2 * i, 2 * i + 1] = -decay * s
+            e_b_dt[2 * i + 1, 2 * i] = decay * s
+            e_b_dt[2 * i + 1, 2 * i + 1] = decay * c
+        w = _lg_ssm_mixing_matrix(dim)
+        a_closed = w @ e_b_dt @ w.T
+
+        gamma = p.gammas[0]
+        q_closed = p.q_c * (1.0 - np.exp(-2.0 * gamma * dt)) / (2.0 * gamma) * np.eye(dim)
+
+        assert np.abs(A - a_closed).max() < 1e-12
+        assert np.abs(Q - q_closed).max() < 1e-12
+        # §2.5 standardization pin: q_c defaults to 2γ so the kappa_v=1
+        # stationary covariance is exactly the identity (Q = (1 - ρ²)·I and
+        # A·Aᵀ = ρ²·I make P = I solve P = A·P·Aᵀ + Q).
+        assert np.abs((A @ A.T + Q) - np.eye(dim)).max() < 1e-12
+
+    def test_lg_ssm_stationary_covariance_matches_discrete_lyapunov(self):
+        # Check (a): for stable A, the empirical covariance of a long
+        # trajectory matches P solving P = A·P·Aᵀ + Q within sampling
+        # tolerance. Run both the normal preset (where P = I by the §2.5
+        # standardization) and a non-normal kappa_v=5 case (where P is far
+        # from identity).
+        from scipy.linalg import solve_discrete_lyapunov
+
+        from serie.catalog import lg_ssm_discretize_exact, lg_ssm_small_spec
+
+        for kappa_v in (1.0, 5.0):
+            spec = lg_ssm_small_spec(kappa_v=kappa_v, steps=60_000)
+            A, Q = lg_ssm_discretize_exact(spec.params, spec.dt)
+            P = solve_discrete_lyapunov(A, Q)
+            traj = generate_from_trajectory_spec(spec, seed=42, dtype=np.float64)
+            empirical = np.cov(traj.T)
+            relative_error = float(np.abs(empirical - P).max() / np.abs(P).max())
+            assert relative_error < 0.05, f"kappa_v={kappa_v}: {relative_error}"
+            if kappa_v == 1.0:
+                assert np.abs(P - np.eye(4)).max() < 1e-12
+
+    def test_lg_ssm_van_loan_q_matches_brute_force_covariance_integral(self):
+        # Check (b): Q from the Van Loan block exponential equals direct
+        # numerical quadrature of ∫₀^dt e^{Fs}·q_c I·e^{Fᵀs} ds (§15.2) for a
+        # small non-normal case.
+        from scipy.integrate import simpson
+        from scipy.linalg import expm
+
+        from serie.catalog import (
+            lg_ssm_discretize_exact,
+            lg_ssm_drift_matrix,
+            lg_ssm_small_spec,
+        )
+
+        spec = lg_ssm_small_spec(kappa_v=5.0)
+        p = spec.params
+        dt = spec.dt
+        _, Q = lg_ssm_discretize_exact(p, dt)
+
+        F = lg_ssm_drift_matrix(p)
+        diffusion = p.q_c * np.eye(F.shape[0])
+        s_grid = np.linspace(0.0, dt, 2001)
+        integrand = np.array([expm(F * s) @ diffusion @ expm(F.T * s) for s in s_grid])
+        q_brute_force = simpson(integrand, x=s_grid, axis=0)
+
+        assert np.abs(Q - q_brute_force).max() < 1e-12
+
+    def test_lg_ssm_nonnormal_transient_growth_exceeds_normal_at_fixed_radius(self):
+        # Check (c): §3.7 scenario 4 ("transient-risk system: ρ(A)=0.9 but
+        # G_50(A) ≫ 1 via non-normal V"). At the same spectral radius, the
+        # ill-conditioned-V system amplifies transients while the normal one
+        # contracts monotonically (‖Aᵏ‖₂ = ρᵏ); both decay asymptotically.
+        from serie.catalog import lg_ssm_discretize_exact, lg_ssm_spec
+
+        def two_norms_of_powers(A: np.ndarray, k_max: int) -> np.ndarray:
+            powers = []
+            a_k = np.eye(A.shape[0])
+            for _ in range(k_max):
+                a_k = a_k @ A
+                powers.append(np.linalg.norm(a_k, 2))
+            return np.array(powers)
+
+        spec_normal = lg_ssm_spec(spectral_radius=0.9, kappa_v=1.0)
+        spec_nonnormal = lg_ssm_spec(spectral_radius=0.9, kappa_v=100.0)
+        A_normal, _ = lg_ssm_discretize_exact(spec_normal.params, spec_normal.dt)
+        A_nonnormal, _ = lg_ssm_discretize_exact(spec_nonnormal.params, spec_nonnormal.dt)
+
+        norms_normal = two_norms_of_powers(A_normal, 300)
+        norms_nonnormal = two_norms_of_powers(A_nonnormal, 300)
+        g50_normal = float(norms_normal[:50].max())
+        g50_nonnormal = float(norms_nonnormal[:50].max())
+
+        assert g50_normal <= 0.9 + 1e-9, "normal case: G_50 = rho (no amplification)"
+        assert g50_nonnormal > 5.0, f"designed transient amplification, got {g50_nonnormal}"
+        assert g50_nonnormal > g50_normal
+        assert norms_normal[-1] < 1e-2, "asymptotic decay (normal)"
+        assert norms_nonnormal[-1] < 1e-2, "asymptotic decay (non-normal)"
+
+    def test_lg_ssm_same_seed_reproduces(self):
+        from serie.catalog import lg_ssm_spec
+
+        spec = lg_ssm_spec(steps=500)
+        a = generate_from_trajectory_spec(spec, seed=7, dtype=np.float64)
+        b = generate_from_trajectory_spec(spec, seed=7, dtype=np.float64)
+        assert np.array_equal(a, b)
+
+    def test_lg_ssm_different_trajectory_seeds_differ(self):
+        from serie.catalog import lg_ssm_spec
+
+        spec = lg_ssm_spec(steps=500)
+        a = generate_from_trajectory_spec(spec, seed=7, dtype=np.float64)
+        b = generate_from_trajectory_spec(spec, seed=8, dtype=np.float64)
+        assert not np.array_equal(a, b)
+
+    def test_lg_ssm_bank_uses_paired_stochastic_draw_design(self):
+        # Check (d): lg_ssm is registered stochastic, so build_dgp_bank spawns
+        # one trajectory seed per draw (each draw a different noise path),
+        # exactly like ou.
+        import serie
+
+        bank = serie.build_dgp_bank("lg_ssm_small", seed=0, n_trajectory_draws=2)
+        assert bank.is_stochastic
+        assert bank.clean.shape[0] == 2
+        assert bank.clean.shape[2] == 4
+        assert not np.array_equal(bank.clean[0], bank.clean[1])
+
+    def test_lg_ssm_param_shock_rebuilds_discretization_at_exact_step(self):
+        # An abrupt params_step_change re-discretizes (A, Q) at the event
+        # step: pre-shock rows are bitwise identical to the unshocked run
+        # (same rng stream, same draw count per step), the shock-step row is
+        # the first to differ.
+        from serie.catalog import LGSSMParams, lg_ssm_small_spec
+
+        spec = lg_ssm_small_spec(steps=200)
+        p = spec.params
+        params_after = LGSSMParams(
+            gammas=tuple(2.0 * g for g in p.gammas),  # faster damping, same block count
+            omegas=p.omegas,
+            kappa_v=p.kappa_v,
+            q_c=p.q_c,
+        )
+        shocked_spec = evolve(
+            spec,
+            shocks=ShockSchedule.single(
+                ShockEvent.params_step_change(params_after=params_after, t_start=0.5)
+            ),
+        )
+        base = generate_from_trajectory_spec(spec, seed=3, dtype=np.float64)
+        shocked = generate_from_trajectory_spec(shocked_spec, seed=3, dtype=np.float64)
+        shock_step = int(0.5 * 200)
+        assert np.array_equal(base[:shock_step], shocked[:shock_step])
+        assert not np.array_equal(base[shock_step], shocked[shock_step])
+
+    def test_lg_ssm_stepped_transition_interpolates_tuple_params(self):
+        # LGSSMParams carries tuple fields (gammas, omegas); the transition
+        # interpolation machinery must flatten and rebuild them (the
+        # DiagonalParams precedent), keeping block count structural.
+        from serie.catalog import LGSSMParams
+
+        before = LGSSMParams(gammas=(0.1, 0.2), omegas=(0.5, 0.25), kappa_v=1.0, q_c=0.2)
+        after = LGSSMParams(gammas=(0.3, 0.4), omegas=(0.7, 0.45), kappa_v=5.0, q_c=0.4)
+        schedule = StepShockSchedule.param_transition(
+            before, after, start_step=10, end_step=20, n_inserts=2
+        )
+        halfway = schedule.param_sets[1]
+        assert isinstance(halfway, LGSSMParams)
+        assert halfway.gammas == pytest.approx((0.2, 0.3))
+        assert halfway.omegas == pytest.approx((0.6, 0.35))
+        assert halfway.kappa_v == pytest.approx(3.0)
+        assert halfway.q_c == pytest.approx(0.3)
+        landed = schedule.param_sets[2]
+        assert landed == after

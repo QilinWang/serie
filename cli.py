@@ -33,8 +33,8 @@ OutputFormat = Literal["text", "json"]
 PlotKind = Literal["timeseries", "attractor", "both"]
 PlotRequest = Literal["none", "timeseries", "attractor", "both"]
 PlotFormat = Literal["png", "pdf", "svg"]
-ArrayFormat = Literal["npy", "csv", "ipc", "parquet", "table", "all"]
-ArrayRequest = Literal["none", "npy", "csv", "ipc", "parquet", "table", "all"]
+ArrayFormat = Literal["npy", "csv", "ipc", "parquet", "table", "safetensors", "all"]
+ArrayRequest = Literal["none", "npy", "csv", "ipc", "parquet", "table", "safetensors", "all"]
 ShockRequest = Literal["none", "param", "state", "switch"]
 _DEMO_SHAPE_SOURCES = ("lorenz", "rossler", "chua")
 _DEMO_SOURCES = ("lorenz", "rossler", "chua", "vanderpol", "henon", "logistic")
@@ -584,10 +584,7 @@ def _walkthrough_payload(
         )
         plot_files[name] = {plot_kind: str(path) for plot_kind, path in written.items()}
 
-    files = [
-        arrays_dir / "lorenz" / "manifest.json",
-        arrays_dir / "lorenz_param_shock" / "manifest.json",
-    ]
+    files = []
     for export_dir, manifest in (
         (arrays_dir / "lorenz", regular_manifest),
         (arrays_dir / "lorenz_param_shock", shifted_manifest),
@@ -596,8 +593,9 @@ def _walkthrough_payload(
         manifest_noisy = cast(list[dict[str, object]], manifest["noisy"])
         for rel in manifest_files.values():
             files.append(export_dir / str(rel))
+        files.append(export_dir / "manifest.json")
         for noisy in manifest_noisy:
-            noisy_files = cast(dict[str, object], noisy["files"])
+            noisy_files = cast(dict[str, object], noisy.get("files", {}))
             for rel in noisy_files.values():
                 files.append(export_dir / str(rel))
     for per_case in plot_files.values():
@@ -615,7 +613,7 @@ def _walkthrough_payload(
         "plot_kind": kind,
         "steps": [
             "Build a clean Lorenz DGP bank and a Lorenz parameter-shift DGP bank.",
-            "Export clean/noise arrays, optional noisy cells, and manifest.json.",
+            "Export clean/noise arrays plus optional noisy cells.",
             "Render four visual cases: regular, regular_noise, param_shift, param_shift_noise.",
             "Check that every declared file exists and report byte sizes.",
         ],
@@ -835,7 +833,7 @@ class Generate:
             long=True,
             help=(
                 "File format for arrays written under --out: none, npy, csv, ipc, "
-                "parquet, table, or all. Stdout is always JSON."
+                "parquet, table, safetensors, or all. Stdout is always JSON."
             ),
         ),
     ] = "none"
@@ -1369,8 +1367,8 @@ def _demo_pack_payload(
         arrays = {
             "array_format": array_format,
             "dir": str(out_dir / "arrays"),
-            "manifest": str(out_dir / "arrays" / "manifest.json"),
             "files": manifest["files"],
+            "manifest": str(out_dir / "arrays" / "manifest.json"),
         }
 
     plots: dict[str, str] = {}
@@ -1445,7 +1443,7 @@ class Demo:
         ArrayRequest,
         cappa.Arg(
             long=True,
-            help="Array artifacts for --out-dir: none, npy, csv, ipc, parquet, table, or all.",
+            help="Array artifacts for --out-dir: none, npy, csv, ipc, parquet, table, safetensors, or all.",
         ),
     ] = "ipc"
     seed: Annotated[int, cappa.Arg(long=True)] = 42

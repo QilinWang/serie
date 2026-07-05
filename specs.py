@@ -35,11 +35,22 @@ from .catalog import (  # noqa: E402
 
 
 def spawn_draw_seeds(seed: int, n: int) -> tuple[int, ...]:
-    """Spawn independent per-draw seeds from one root entropy value."""
+    """Spawn independent per-draw seeds from one root entropy value.
+
+    Mirrors the ``serie-rs`` SplitMix64 draw derivation and returns
+    uint32-compatible child seeds. The root seed plus draw ordinal is the
+    reproducible recipe.
+    """
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")
-    sequence = np.random.SeedSequence(int(seed))
-    return tuple(int(child.generate_state(1, dtype=np.uint32)[0]) for child in sequence.spawn(n))
+    seed_base = int(seed) & 0xFFFFFFFFFFFFFFFF
+    seeds: list[int] = []
+    for draw_ordinal in range(n):
+        x = seed_base ^ ((0x9E3779B97F4A7C15 * (draw_ordinal + 1)) & 0xFFFFFFFFFFFFFFFF)
+        x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+        x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+        seeds.append(int((x ^ (x >> 31)) & 0xFFFFFFFF))
+    return tuple(seeds)
 
 
 _ODE_METHOD_SYSTEMS = frozenset(
