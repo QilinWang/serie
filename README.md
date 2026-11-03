@@ -7,6 +7,16 @@
 
 [中文说明](README.zh-CN.md)
 
+## Explore the interactive demo
+
+[![A recorded SERIE demo: changing observation noise on the Lorenz attractor](https://raw.githubusercontent.com/QilinWang/serie/main/docs/media/serie-noise-demo.gif)](https://qilinwang.github.io/serie/)
+
+[**Open the interactive demo**](https://qilinwang.github.io/serie/) to choose
+Lorenz, Rössler, or Chua, adjust observation noise, and select a noise
+realization. Blue shows the clean trajectory; orange shows its noisy
+observation. The demo visualizes synthetic data, not a forecast or a model
+performance comparison.
+
 **Stress-test a time-series forecaster before you ship it — against the regime shifts and measurement noise *you* know it will face, with ground truth known exactly.**
 
 
