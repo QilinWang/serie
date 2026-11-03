@@ -17,101 +17,40 @@ realization. Blue shows the clean trajectory; orange shows its noisy
 observation. The demo visualizes synthetic data, not a forecast or a model
 performance comparison.
 
-**Stress-test a time-series forecaster before you ship it — against the regime shifts and measurement noise *you* know it will face, with ground truth known exactly.**
+**Build controlled time-series datasets to investigate how forecasting models
+behave under changes in dynamics and observation noise.**
 
+A good score on one dataset does not explain how a forecaster behaves when its
+inputs change. SERIE lets you construct specific scenarios, inspect the generated
+clean trajectory and injected noise, and prepare datasets for an evaluation.
+You can use domain knowledge to choose the scenarios you want to examine.
 
-You've trained a forecasting model and the validation numbers look good. Now the
-real question: **how do you prove it's safe to put into production?** Before a
-bridge carries traffic or a chip leaves the fab, it is stress-tested against
-conditions its engineers chose on purpose. A model about to drive trades,
-dispatch power, or flag a failing machine deserves the same — a factory seal
-that says *tested, and here is exactly what it can take.*
-
-The usual answer is to run the model on a standard benchmark and report the
-error. But that is a grade on one slice of history, and it stays silent on the
-two things that actually break forecasters in the field. The first is when the
-world **shifts** under the model — a market regime turns, a machine's dynamics
-drift, a shock lands. The second is when the **signal degrades** — sensors get
-noisier, readings go missing, sampling coarsens. On real-world data you cannot
-even ask these questions cleanly: you do not control when the regime changes and
-you do not know the true process, so you can never separate "the model failed"
-from "the data was ambiguous." In the lab there is only so much you can do — and
-right now the field is not even doing that much.
-
-SERIE is that lab — and the crucial part is that *you* design the stresses, from
-what you know about your own system. You choose which regime shift to inject and
-exactly when; you supply the noise law your channel actually exhibits, not a
-textbook default; and because the underlying system is synthetic, its ground
-truth is known *exactly*. So the conditions you test under aren't someone else's
-idea of failure — they are the ones your forecaster will really meet in your
-domain — and what comes out is a falsifiable, repeatable seal rather than a
-leaderboard number. That is the step beyond benchmarking: not "what score did it
-get," but "what, precisely, can it withstand under the conditions *I* know
-matter — and can anyone re-verify that?"
+A synthetic scenario is an explicit hypothesis about a system, not a guarantee
+that it captures every real-world failure. SERIE supplies data; forecasts,
+metrics and statistical conclusions come from the evaluation built around it.
+Results describe the tested settings and do not certify deployment safety.
 
 ## What it lets you do
 
-Two of these stresses are yours to author — and the one who authors them can be a
-domain specialist, or a model trained to know that domain's failure modes:
-
-- **Design the regime change you actually fear.** SERIE doesn't hand you a fixed
-  menu of shocks — you specify the intervention yourself: which parameter drifts
-  and by how much, whether the state takes a sudden perturbation or the trajectory
-  switches into a new regime, and the exact moment it strikes. That is where your domain knowledge
-  enters. A quant encodes the volatility spike or correlation breakdown that has
-  burned the desk before; a controls engineer encodes the actuator fault; a grid
-  operator encodes the load shock that follows a heatwave. The stress is no longer
-  generic — it is the specific failure your system will meet in deployment — and
-  because you declared exactly what changed and when, "the model breaks under
-  *this* shift" emerges as a measured, falsifiable result instead of a standing
-  worry.
-
-- **Dial up your noise, not a textbook's.** Real measurement noise is rarely clean
-  Gaussian: it is heavy-tailed on outlier-prone sensors, bursty on a lossy link,
-  skewed, sometimes carried in real physical units. SERIE lets you supply the law
-  you know your channel actually has — any `(rng, shape) -> array` you can write —
-  and then turn it up in measured doses, from pristine to severe, tracing where the
-  model's forecasts come apart. What you get is the model's tolerance to the
-  degradation that will *really* happen, not to an idealization — and that
-  degradation curve is the operating envelope you stamp on the seal: rated to here,
-  no further.
-
-- **Test the model, not the data.** Every synthetic source — Lorenz,
-  Ornstein–Uhlenbeck, GARCH, and more — has dynamics whose statistics are known
-  in closed form. So when a forecast is wrong, the error is unambiguously the
-  model's: there is no half-corrupted real series to argue about. You are
-  certifying against a known spec, which is the only way a seal means anything.
-
-- **Compare models and doses fairly.** When you pit two models against each other,
-  or one model at two noise levels, the difference has to be real — not an
-  artifact of which random numbers you happened to draw. SERIE reuses the *same*
-  frozen noise across every sigma (a technique called common random numbers), so
-  two settings differ only by the thing you changed. That is what lets you run an
-  actual significance test and trust the verdict, instead of re-running and
-  hoping.
-
-- **Check whether the confidence is honest.** A forecast is a number *and* a
-  stated confidence, and a model that is confidently wrong is the dangerous kind —
-  because you size a position or dispatch a crew based on that confidence. To
-  audit it you must know the true distribution of the noise you injected, which
-  SERIE does exactly. Then you can ask the questions that matter: does the model's
-  90% interval actually contain the truth 90% of the time (**coverage**); is its
-  predicted distribution the right shape (the **probability integral transform**,
-  PIT); how surprised is it by reality on average (**negative log-likelihood**,
-  NLL). Honest uncertainty is half of what "ready to ship" means, and SERIE is
-  built to measure it.
-
-- **Issue a seal anyone can re-verify.** A certification no one can reproduce is
-  worthless. The same seed produces byte-identical data on any machine, and every
-  dataset is stamped with a protocol version — so "tested on SERIE, Lorenz,
-  sigma 0.3" denotes one exact thing that you, a teammate, or a reviewer can
-  regenerate and re-check months later.
-
-- **Bring your own system — it is not synthetic-only.** SERIE is not limited to
-  simulated data. Hand it a clean recording — a wearable gait trace, sensor logs,
-  your own production series as a `[T, D]` array — and it stress-tests that the
-  same way: perturb it with controlled noise, split it, certify against it. The lab
-  comes to your domain, not the other way around.
+- **Specify changes in dynamics.** Configure a synthetic trajectory and
+  interventions such as parameter or state changes, or a switch to another
+  regime. This makes the simulated change and its timing explicit.
+- **Vary observation noise.** Use Gaussian, Laplace or a custom noise sampler
+  and scale a selected noise draw. The clean trajectory and the generated
+  observation can be inspected separately.
+- **Make paired noise comparisons.** For a fixed bank, trajectory and noise
+  draw, changing sigma reuses that draw rather than sampling another one.
+  Controlling this source of variation helps a comparison; a sound experiment
+  still needs appropriate repetitions, metrics and statistical analysis.
+- **Use a recorded series as a reference.** A supplied time-series array can
+  be treated as the clean reference for additional observation noise. A real
+  recording can itself contain measurement error, so it is not automatically
+  the underlying physical truth.
+- **Prepare reproducible evaluations.** Keep the source, settings, seeds,
+  package version and generated artifacts with the evaluation. Sharing the
+  generated data avoids depending on an unverified promise of byte-identical
+  generation across all machines. A separate evaluation can use point or
+  probabilistic metrics, including coverage, PIT or NLL when appropriate.
 
 ## How it works — a five-minute tour
 
@@ -149,10 +88,8 @@ print(split.train_stats.std)      # per-channel std, train only (no leakage)
 
 ### Why "build_dgp_bank once"?
 
-The split between `build_dgp_bank` and `inject_noise` isn't only about speed — it's what makes
-a comparison trustworthy. Because the noise reservoir is *frozen* inside
-`bank`, every dose drawn from the same `bank` reuses the **same**
-underlying random draw:
+The split between `build_dgp_bank` and `inject_noise` allows paired comparisons.
+For the same trajectory and noise draw, each dose uses the same frozen noise:
 
 ```python
 clean = inject_noise(bank, sigma=0.0)   # the pristine signal
@@ -160,11 +97,11 @@ mild  = inject_noise(bank, sigma=0.1)   # same signal + 0.1 × (the same noise)
 harsh = inject_noise(bank, sigma=0.5)   # same signal + 0.5 × (the same noise)
 ```
 
-The *only* thing that changed between `mild` and `harsh` is the dose — not which
-random numbers came up. That's the experimental-control trick called **common
-random numbers**: a difference in your model's error across these doses is caused
-by the noise *level*, not by luck. Re-running `build_dgp_bank` per dose would quietly
-break that guarantee.
+In this example, the generated observations differ in their noise multiplier,
+not in which underlying noise was drawn. This pairing is called **common random
+numbers**. A single draw does not establish the typical model response; use
+independent draws and account for other sources of variation in the evaluation.
+Choosing different noise draws for each dose would remove this pairing.
 
 (Want independent repeats on top? For deterministic sources, that means one
 clean trajectory plus many noise draws. For stochastic sources, it
@@ -185,8 +122,8 @@ for sigma in [0.0, 0.1, 0.25, 0.5, 1.0]:
     print(f"sigma={sigma}: error={error:.4f}")
 ```
 
-The curve of error vs `sigma` is the model's tolerance — the operating envelope
-from above, made concrete.
+The error-versus-`sigma` curve describes the model's response under the chosen
+data and evaluation settings. Repeat over appropriate draws to assess variability.
 
 ### Bringing your own data
 
@@ -206,7 +143,7 @@ units.)
 
 ## Install
 
-After publication:
+From PyPI:
 
 ```bash
 python -m pip install serie
@@ -444,7 +381,7 @@ split = inject_noise(bank, sigma=1.0, sigma_scale="train_std")
 by its clean train-split standard deviation. This is the public form of the
 signal-relative dosing used in the papers.
 
-### Noise Laws
+### Noise distributions
 
 Noise is not limited to Gaussian draws:
 
@@ -453,11 +390,11 @@ bank = build_dgp_bank("lorenz", seed=42, noise_kind="laplace")
 ```
 
 `noise_kind` accepts `"gaussian"`, `"laplace"`, or a callable
-`(rng, shape) -> array`. The built-in laws are unit-variance by convention, so
-`sigma` reads as the injected noise standard deviation and different laws are
-matched by noise power. Custom laws may use any known physical scale; then
+`(rng, shape) -> array`. The built-in distributions are unit-variance by convention, so
+`sigma` reads as the injected noise standard deviation and different distributions are
+matched by noise power. Custom distributions may use any known physical scale; then
 `sigma` is a raw multiplier and the draw distribution owns the scale. The hard
-requirement is that the injected law is exactly known and reported.
+requirement is that the injected distribution is exactly known and reported.
 
 ### Synthetic Parameters
 
@@ -571,11 +508,11 @@ statistically clean design from the source:
   trajectory draw `r` with noise draw `r`.
 
 That paired stochastic design is the main benchmark path: every ensemble member
-is one draw from the full future law, and the same paired draws are reused across
+is one draw from the full future distribution, and the same paired draws are reused across
 all sigma levels. Two diagnostic designs are explicit:
 
 - `trajectory_fixed`: one stochastic trajectory path with many noise
-  draws; useful for measurement-noise-only diagnostics, not the full SDE law.
+  draws; useful for measurement-noise-only diagnostics, not the full SDE distribution.
 - `cross_product`: the full trajectory × noise grid; useful when that grid is
   the experiment, but not the default unit of replication.
 
