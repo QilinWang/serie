@@ -1,5 +1,11 @@
 # SERIE
 
+[![干净的合成 Lorenz 轨迹，以及同一轨迹叠加观测噪声后的结果](https://raw.githubusercontent.com/QilinWang/serie/main/docs/media/serie-hero.png)](https://qilinwang.github.io/serie/)
+
+**看见观测噪声如何改变时间序列。** [打开交互演示 →](https://qilinwang.github.io/serie/)
+
+蓝色是合成的 Lorenz 轨迹，橙色是同一轨迹加入观测噪声后的结果；右图将两者叠加。
+
 **构造受控的时间序列数据，研究预测模型面对机制变化和观测噪声时的表现。**
 
 [English README](README.md)

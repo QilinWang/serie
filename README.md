@@ -1,5 +1,11 @@
 # SERIE
 
+[![Clean synthetic Lorenz trajectory beside the same trajectory with observation noise](https://raw.githubusercontent.com/QilinWang/serie/main/docs/media/serie-hero.png)](https://qilinwang.github.io/serie/)
+
+**See how observation noise changes a time series.** [Explore the interactive demo →](https://qilinwang.github.io/serie/)
+
+The synthetic Lorenz trajectory is blue; the same trajectory with observation noise is orange. The right panel overlays both.
+
 [![CI](https://github.com/QilinWang/serie/actions/workflows/ci.yml/badge.svg)](https://github.com/QilinWang/serie/actions/workflows/ci.yml)
 [![Pages Demo](https://github.com/QilinWang/serie/actions/workflows/pages-demo.yml/badge.svg)](https://github.com/QilinWang/serie/actions/workflows/pages-demo.yml)
 [![PyPI](https://img.shields.io/pypi/v/serie.svg)](https://pypi.org/project/serie/)
