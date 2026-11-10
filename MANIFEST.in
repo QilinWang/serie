@@ -1,4 +1,3 @@
-exclude Justfile
 exclude .claude/*
 exclude .pytest_cache/*
 exclude __pycache__/*

@@ -83,17 +83,6 @@ def test_cli_rejects_unknown_source():
         cli.main(["generate", "not_a_source"])
 
 
-def test_cli_generate_prints_one_cell_json(capsys):
-    cli.main(["generate", "ou", "--sigma", "0.1", "--array-format", "none"])
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["source"] == "ou"
-    assert payload["shock"] == "none"
-    assert payload["sigma"] == 0.1
-    assert payload["cell_id"].startswith("ou_")
-    assert len(payload["cell_hash"]) == 16
-    assert payload["artifacts"] is None
-
-
 def test_cli_generate_train_std_json_is_parseable(capsys):
     cli.main(
         [
@@ -115,6 +104,12 @@ def test_cli_generate_json_schema_is_stable(capsys):
     cli.main(["generate", "ou", "--sigma", "0.1", "--array-format", "none"])
     payload = json.loads(capsys.readouterr().out)
 
+    assert payload["source"] == "ou"
+    assert payload["shock"] == "none"
+    assert payload["sigma"] == 0.1
+    assert payload["cell_id"].startswith("ou_")
+    assert len(payload["cell_hash"]) == 16
+    assert payload["artifacts"] is None
     assert sorted(payload) == [
         "artifacts",
         "cell_hash",
@@ -453,7 +448,7 @@ def test_cli_generate_plot_both_writes_timeseries_and_attractor(tmp_path, capsys
     assert (artifact_dir / "lorenz_attractor.png").exists()
 
 
-def test_cli_generate_plot_intervention_source_writes_timeseries_with_reference_path(
+def test_cli_generate_plot_intervention_source_writes_timeseries(
     tmp_path, capsys
 ):
     pytest.importorskip("matplotlib")
@@ -479,6 +474,62 @@ def test_cli_generate_plot_intervention_source_writes_timeseries_with_reference_
     assert payload["source"] == "lorenz_param_shock"
     assert sorted(payload["artifacts"]["plots"]) == ["timeseries"]
     assert (artifact_dir / "lorenz_param_shock_timeseries.png").exists()
+
+
+@pytest.mark.parametrize(("shock", "has_reference"), [("none", False), ("param", True)])
+def test_cli_plot_routes_unshocked_reference_only_for_interventions(
+    shock, has_reference, tmp_path, capsys, monkeypatch
+):
+    import msgspec
+    import numpy as np
+    from serie import build_empirical_dgp_bank, plots
+
+    class SyntheticSchedule(msgspec.Struct):
+        is_stationary: bool
+
+    class SyntheticSource(msgspec.Struct):
+        tag: str
+        shocks: SyntheticSchedule
+        shape_label: str
+
+    def resolve(source, *, shock):
+        return "synthetic", SyntheticSource(
+            tag="synthetic", shocks=SyntheticSchedule(shock == "none"), shape_label="three_channels"
+        )
+
+    values = np.arange(60, dtype=np.float32).reshape(20, 3)
+    observed_bank = build_empirical_dgp_bank(values, name="observed")
+    reference_bank = build_empirical_dgp_bank(values + 1, name="reference")
+    calls = []
+    seen = []
+
+    def build(source, **kwargs):
+        calls.append((source, kwargs))
+        return observed_bank if len(calls) == 1 else reference_bank
+
+    def plot(bank, *, reference_bank, out, **kwargs):
+        seen.append((bank, reference_bank))
+        return {"timeseries": out / "synthetic.png"}
+
+    monkeypatch.setattr(cli, "_resolve_generate_source", resolve)
+    monkeypatch.setattr(cli, "build_dgp_bank", build)
+    monkeypatch.setattr(plots, "plot_dgp_bank_saves", plot)
+    cli.main(["generate", "synthetic", "--shock", shock, "--out", str(tmp_path),
+              "--plot", "timeseries"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["shock"] == shock
+    assert len(calls) == (2 if has_reference else 1)
+    assert seen == [(observed_bank, reference_bank if has_reference else None)]
+    assert calls[0][0].shocks.is_stationary is (not has_reference)
+    if has_reference:
+        assert calls[1][0].shocks.is_stationary
+        assert calls[0][1] == calls[1][1]
+        original = msgspec.to_builtins(calls[0][0])
+        reference = msgspec.to_builtins(calls[1][0])
+        original.pop("shocks")
+        reference.pop("shocks")
+        assert original == reference
 
 
 def test_cli_generate_plot_both_skips_attractor_for_one_channel_source(tmp_path, capsys):

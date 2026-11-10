@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+from msgspec.structs import replace
+
+from dataclasses import dataclass
+from serie.records import DataclassRecord
+
 import contextlib
-from enum import Enum
-import hashlib
 import io
 import json
 import logging
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 import re
-from typing import Annotated, Any, Literal, Mapping, cast
+from typing import Annotated, Any, Literal, cast
 
-import attrs
 import cappa
+import msgspec
 import numpy as np
+
+from .controller_fork_bank import RecordedReferenceLayout
 
 from . import (
     PartitionSpec,
@@ -24,6 +29,7 @@ from . import (
     export_dgp_bank_files,
     inject_noise,
 )
+from .canonical_json import canonical_hash_16, canonical_value
 from .catalog import list_sources, source_preset
 from .pipeline import KnownDataID, DrawDesign, known_data_root
 from .specs import ShockSchedule, TrajectorySpec
@@ -82,6 +88,24 @@ _CLI_COMMANDS = (
         "example": "serie generate lorenz --shock param --sigma 0.1 --out tmp/lorenz --plot both --array-format csv",
     },
     {
+        "group": "02 generate",
+        "command": "freeze-controller-candidate-bank",
+        "summary": "Freeze all legal Reacher gear forks from matched controller recordings.",
+        "example": "serie freeze-controller-candidate-bank --source-root results/corpus/controller_recordings/reacher-47s-sine-match --factors 0.5,1,1.5 --history 336 --horizon 192 --out results/corpus/controller_recordings/reacher-47s-sine-match/candidate-origins-l336-h192.npz",
+    },
+    {
+        "group": "02 generate",
+        "command": "freeze-recorded-controller-references",
+        "summary": "Extract actual TRAIN state/action transitions from existing gear recordings without simulation.",
+        "example": "serie freeze-recorded-controller-references --recordings GEAR05/manifest.json,GEAR1/manifest.json,GEAR15/manifest.json --factors 0.5,1,1.5 --out REFERENCES.npz",
+    },
+    {
+        "group": "02 generate",
+        "command": "freeze-controller-reference-derivatives",
+        "summary": "Freeze physical-direction observation responses from foreign TRAIN episodes.",
+        "example": "serie freeze-controller-reference-derivatives --recording RECORDING/manifest.json --reference-anchor 48 --factors 0.5,1,1.5 --epsilons 0.001,0.0001,0.00001 --selected-epsilon 0.0001 --direction-seed 12323 --out REFERENCE.npz",
+    },
+    {
         "group": "03 visualize",
         "command": "demo",
         "summary": "Generate an interactive 3D attractor HTML page with controllable noise.",
@@ -128,60 +152,11 @@ def _array_summary(values: Any, *, limit: int = 8) -> list[float]:
     return [float(x) for x in flat[:limit]]
 
 
-def _require_source(source: str) -> str:
-    valid_sources = list_sources()
-    if source not in valid_sources:
-        valid = ", ".join(valid_sources)
-        raise SystemExit(f"unknown source {source!r}; valid synthetic sources: {valid}")
-    return source
-
-
 def _require_partition(name: str) -> str:
     if name not in _PARTITIONS:
         valid = ", ".join(sorted(_PARTITIONS))
         raise SystemExit(f"unknown partition {name!r}; valid partitions: {valid}")
     return name
-
-
-def _canonical_value(value: Any) -> Any:
-    """Convert SERIE config objects into JSON-stable values for hashing."""
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, Path):
-        return str(value)
-    if attrs.has(value.__class__):
-        out: dict[str, Any] = {}
-        for field in attrs.fields(value.__class__):
-            if field.name.startswith("_"):
-                continue
-            out[field.name] = _canonical_value(getattr(value, field.name))
-        return out
-    if isinstance(value, Mapping):
-        return {str(_canonical_value(k)): _canonical_value(v) for k, v in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_canonical_value(item) for item in value]
-    item = getattr(value, "item", None)
-    if callable(item):
-        try:
-            return _canonical_value(item())
-        except Exception:
-            pass
-    return str(value)
-
-
-def _canonical_json_bytes(value: Any) -> bytes:
-    return json.dumps(
-        _canonical_value(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
-
-
-def _identity_hash(value: Any) -> str:
-    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()[:16]
 
 
 def _path_component(value: Any) -> str:
@@ -233,7 +208,7 @@ def _resolve_generate_source(source: str, *, shock: ShockRequest) -> tuple[str, 
 def _reference_source_for_plot(source: TrajectorySpec) -> TrajectorySpec | None:
     if source.shocks.is_stationary:
         return None
-    return attrs.evolve(source, shocks=ShockSchedule.none())
+    return replace(source, shocks=ShockSchedule.none())
 
 
 def _dgp_bank_metadata(bank) -> dict[str, Any]:
@@ -281,7 +256,7 @@ def _generate_cell_identity(
         "source": {
             "requested": source_key,
             "resolved": source_spec.tag,
-            "spec": _canonical_value(source_spec),
+            "spec": canonical_value(source_spec),
         },
         "cell": {
             "shock": shock,
@@ -413,7 +388,7 @@ def _generate_payload(
         image_format=image_format,
         dpi=dpi,
     )
-    cell_hash = _identity_hash(cell_identity)
+    cell_hash = canonical_hash_16(cell_identity)
     cell_id = f"{_path_component(source_key)}_{cell_hash[:12]}"
     bank = build_dgp_bank(
         source_spec,
@@ -678,8 +653,8 @@ def _commands_payload() -> dict[str, Any]:
 
 
 @cappa.command(name="list-cli-commands")
-@attrs.define
-class Commands:
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class Commands(DataclassRecord):
     """List SERIE CLI commands with examples."""
 
     format: Annotated[OutputFormat, cappa.Arg(long=True)] = "text"
@@ -707,8 +682,8 @@ class Commands:
 
 
 @cappa.command(name="list-data-ids")
-@attrs.define
-class List:
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class List(DataclassRecord):
     """List built-in synthetic and known source names."""
 
     format: Annotated[OutputFormat, cappa.Arg(long=True)] = "text"
@@ -724,8 +699,8 @@ class List:
 
 
 @cappa.command(name="show-data-dir")
-@attrs.define
-class DataDir:
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class DataDir(DataclassRecord):
     """Print the external dataset directory."""
 
     format: Annotated[OutputFormat, cappa.Arg(long=True)] = "text"
@@ -736,8 +711,8 @@ class DataDir:
 
 
 @cappa.command
-@attrs.define
-class Generate:
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class Generate(DataclassRecord):
     """Generate one SERIE dataset cell.
 
     This is the main SERIE data command. It builds one source, optionally applies
@@ -952,8 +927,8 @@ class Generate:
 
 
 @cappa.command
-@attrs.define
-class Walkthrough:
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class Walkthrough(DataclassRecord):
     """Generate arrays and figures for the standard SERIE example."""
 
     out: Annotated[Path, cappa.Arg(long=True)] = Path("serie_walkthrough")
@@ -1243,7 +1218,7 @@ def _demo_payload(
     if not index_html.exists():
         raise SystemExit(
             f"Pre-built demo template not found at {index_html}. "
-            f"If installing from source, run: cd serie/demo && bun run build && cp -R dist ../demo_dist"
+            f"If installing from source, run: cd src/serie/demo && bun run build && cp -R dist ../demo_dist"
         )
 
     resolved_sources = _resolve_demo_sources(source, systems)
@@ -1289,7 +1264,7 @@ def _demo_payload(
             injected_scripts += 1
 
     if injected_scripts == 0 or "window.__SERIE_DEMO_DATA__" not in html:
-        raise SystemExit("failed to inline SERIE demo template; rebuild serie/demo_dist")
+        raise SystemExit("failed to inline SERIE demo template; rebuild src/serie/demo_dist")
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
@@ -1401,8 +1376,8 @@ def _demo_pack_payload(
 
 
 @cappa.command
-@attrs.define
-class Demo:
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class Demo(DataclassRecord):
     """Generate an interactive 3D trajectory HTML page with controllable noise."""
 
     source: Annotated[str, cappa.Arg(default="lorenz")]
@@ -1495,8 +1470,8 @@ class Demo:
 
 
 @cappa.command
-@attrs.define
-class Version:
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class Version(DataclassRecord):
     """Print package version."""
 
     def __call__(self) -> None:
@@ -1506,9 +1481,228 @@ class Version:
             print("0.1.1+local")
 
 
+@cappa.command(name="freeze-controller-candidate-bank")
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class FreezeControllerCandidateBank(DataclassRecord):
+    """Freeze controller gear branches and independent reference examples without training."""
+
+    out: Annotated[Path, cappa.Arg(long=True)]
+    factors: Annotated[str | None, cappa.Arg(long=True)] = None
+    history: Annotated[int | None, cappa.Arg(long=True)] = None
+    horizon: Annotated[int | None, cappa.Arg(long=True)] = None
+    source_root: Annotated[Path | None, cappa.Arg(long=True)] = None
+    recording: Annotated[Path | None, cappa.Arg(long=True)] = None
+    reference_anchor: Annotated[int | None, cappa.Arg(long=True)] = None
+    event_sequence: Annotated[Path | None, cappa.Arg(long=True)] = None
+
+    def __call__(self) -> None:
+        from .controller_fork_bank import (
+            freeze_controller_candidate_origins, load_controller_candidate_bank, load_controller_recording_bank,
+            ControllerTwoEventRequest, freeze_controller_two_event_origins,
+        )
+
+        # CHG: this arm is query truth only. Its complete typed request owns
+        # origins/windows/events; single-event/reference flags cannot override it.
+        if self.event_sequence is not None:
+            if (self.recording is None or self.source_root is not None or self.reference_anchor is not None
+                    or self.factors is not None or self.history is not None or self.horizon is not None):
+                raise ValueError("--event-sequence requires --recording and excludes the one-event factors/history/horizon/reference flags")
+            request = msgspec.json.decode(self.event_sequence.read_bytes(), type=ControllerTwoEventRequest)
+            frozen = freeze_controller_two_event_origins(self.recording, request=request, output=self.out)
+            _emit({"path": str(self.out.resolve()), "schema": frozen.metadata["schema"],
+                   "episodes": len(request.episodes), "origins_per_episode": len(request.anchors),
+                   "candidate_counts": [len(axis.factors) for axis in request.events],
+                   "history": request.history, "horizon": request.horizon,
+                   "shape": list(frozen.rollouts.shape), "meaning": "two-event query truth; no reference or prediction"}, "json")
+            return
+        if self.factors is None or self.history is None or self.horizon is None:
+            raise ValueError("one-event freezing requires explicit --factors, --history and --horizon")
+        tokens = tuple(token.strip() for token in self.factors.split(","))
+        if len(tokens) < 2 or any(re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", token) is None for token in tokens):
+            raise ValueError("--factors needs comma-separated positive decimal values")
+        values = tuple(float(token) for token in tokens)
+        if (self.source_root is None) == (self.recording is None):
+            raise ValueError("choose exactly one --source-root or --recording")
+        if self.recording is not None:
+            if self.reference_anchor is None:
+                raise ValueError("--recording requires an explicit --reference-anchor")
+            bank = load_controller_recording_bank(self.recording, factors=values, reference_anchor=self.reference_anchor)
+        else:
+            if self.reference_anchor is not None:
+                raise ValueError("matched source-root uses its recorded event anchor")
+            paths = tuple(self.source_root / f"factor-{token}" / "manifest.json" for token in tokens)
+            bank = load_controller_candidate_bank(paths, factors=values)
+        frozen = freeze_controller_candidate_origins(
+            bank, history=self.history, horizon=self.horizon, output=self.out,
+        )
+        _emit({
+            "path": str(self.out.resolve()),
+            "episodes": len(frozen.splits),
+            "origins_per_episode": len(frozen.anchors),
+            "candidates": len(frozen.factors),
+            "history": frozen.history,
+            "horizon": frozen.horizon,
+            "shape": list(frozen.rollouts.shape),
+        }, "json")
+
+
+# CHG 2026-09-30: extracting existing foreign examples never calls a simulator.
+@cappa.command(name="freeze-recorded-controller-references")
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class FreezeRecordedControllerReferences(DataclassRecord):
+    """Freeze actual TRAIN before/after examples from declared gear recordings."""
+
+    out: Annotated[Path, cappa.Arg(long=True)]
+    # CHG: event-transition requests bind their own sources; absence distinguishes
+    # this typed arm from the old command, whose matched-layout default is unchanged.
+    recordings: Annotated[str | None, cappa.Arg(long=True)] = None
+    # CHG: the old --factors operation stays matched; independent layout is explicit.
+    factors: Annotated[str | None, cappa.Arg(long=True)] = None
+    source_layout: Annotated[RecordedReferenceLayout | None, cappa.Arg(long=True)] = None
+    event_transitions: Annotated[Path | None, cappa.Arg(long=True)] = None
+
+    def __call__(self) -> None:
+        from .controller_fork_bank import (
+            IndependentControllerReferenceSource, MatchedControllerReferenceSource, freeze_recorded_controller_references,
+            RecordedControllerEventRequest, freeze_recorded_controller_event_transitions,
+        )
+
+        if self.event_transitions is not None:
+            if self.recordings is not None or self.factors is not None or self.source_layout is not None:
+                raise ValueError("--event-transitions binds its own sources/events; legacy reference-layout flags cannot also select them")
+            request = msgspec.json.decode(self.event_transitions.read_bytes(), type=RecordedControllerEventRequest)
+            frozen = freeze_recorded_controller_event_transitions(request, output=self.out)
+            _emit({"path": str(self.out.resolve()), "schema": frozen.metadata["schema"],
+                "world": frozen.metadata["world"], "train_references": len(frozen.episodes),
+                "interval_start_shape": list(frozen.interval_start.shape),
+                "interval_end_shape": list(frozen.interval_end.shape), "action_shape": list(frozen.actions.shape),
+                "meaning": frozen.metadata["state_meaning"],
+                "events": [item["selected_event"]["event_id"] for item in frozen.metadata["events"]]}, "json")
+            return
+        if self.recordings is None:
+            raise ValueError("legacy recorded references require --recordings; event-transition sources belong in --event-transitions")
+        # The old CLI builder's sole matched default remains on its original arm.
+        layout = RecordedReferenceLayout.MATCHED_FACTOR_RECORDINGS if self.source_layout is None else self.source_layout
+        paths = tuple(Path(token.strip()) for token in self.recordings.split(",") if token.strip())
+        if layout is RecordedReferenceLayout.INDEPENDENT_EPISODES:
+            if len(paths) != 1 or self.factors is not None:
+                raise ValueError("independent references require one mixed manifest and no per-manifest --factors")
+            source = IndependentControllerReferenceSource(paths[0])
+        else:
+            if self.factors is None:
+                raise ValueError("matched reference recordings require their explicit --factors")
+            source = MatchedControllerReferenceSource(paths, tuple(float(token.strip()) for token in self.factors.split(",")))
+        frozen = freeze_recorded_controller_references(source, output=self.out)
+        _emit({"path": str(self.out.resolve()), "schema": frozen.metadata["schema"],
+               "world": frozen.metadata["world"], "train_references": len(frozen.episodes),
+               "pair_shape": list(frozen.pairs.shape), "action_shape": list(frozen.actions.shape),
+               "references_per_actual_gear": {str(factor): int(np.count_nonzero(frozen.factors == factor))
+                                              for factor in np.unique(frozen.factors)},
+               "selection_rule": frozen.metadata["selection_rule"],
+               "meaning": "actual recorded transitions; no simulation, replay or reference gear change"}, "json")
+
+
+# CHG 2026-09-30: one typed source producer for the foreign derivative bank;
+# all scientific numerical settings are explicit CLI arguments.
+@cappa.command(name="freeze-controller-reference-derivatives")
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class FreezeControllerReferenceDerivatives(DataclassRecord):
+    """Freeze one-record directional responses in physical tangent coordinates."""
+
+    factors: Annotated[str, cappa.Arg(long=True)]
+    epsilons: Annotated[str, cappa.Arg(long=True)]
+    selected_epsilon: Annotated[float, cappa.Arg(long=True)]
+    direction_seed: Annotated[int, cappa.Arg(long=True)]
+    out: Annotated[Path, cappa.Arg(long=True)]
+    source_root: Annotated[Path | None, cappa.Arg(long=True)] = None
+    recording: Annotated[Path | None, cappa.Arg(long=True)] = None
+    reference_anchor: Annotated[int | None, cappa.Arg(long=True)] = None
+
+    def __call__(self) -> None:
+        from .controller_fork_bank import (
+            freeze_controller_reference_derivatives, load_controller_candidate_bank, load_controller_recording_bank,
+        )
+
+        tokens = tuple(token.strip() for token in self.factors.split(","))
+        factors = tuple(float(token) for token in tokens)
+        epsilons = tuple(float(token.strip()) for token in self.epsilons.split(","))
+        if (self.source_root is None) == (self.recording is None):
+            raise ValueError("choose exactly one --source-root or --recording")
+        if self.recording is not None:
+            if self.reference_anchor is None:
+                raise ValueError("--recording requires an explicit --reference-anchor")
+            bank = load_controller_recording_bank(self.recording, factors=factors, reference_anchor=self.reference_anchor)
+        else:
+            if self.reference_anchor is not None:
+                raise ValueError("matched source-root uses its recorded event anchor")
+            paths = tuple(self.source_root / f"factor-{token}" / "manifest.json" for token in tokens)
+            bank = load_controller_candidate_bank(paths, factors=factors)
+        frozen = freeze_controller_reference_derivatives(
+            bank, epsilons=epsilons, selected_epsilon=self.selected_epsilon,
+            direction_seed=self.direction_seed, output=self.out,
+        )
+        absolute = np.abs(frozen.responses[:, :, 1:] - frozen.responses[:, :, :-1])
+        denominator = np.abs(frozen.responses[:, :, 1:]) + np.abs(frozen.responses[:, :, :-1])
+        relative = np.divide(absolute, denominator, out=np.zeros_like(absolute), where=denominator != 0)
+        if frozen.contact_trace is None:
+            raise ValueError("new derivative producer must return v2 native contact diagnostics")
+        _emit({"path": str(self.out.resolve()), "train_reference_episodes": len(frozen.episodes),
+               "physical_tangent_size": frozen.tangent_size, "observed_channels": frozen.reference_states.shape[-1],
+               "response_shape": list(frozen.responses.shape), "selected_epsilon": frozen.selected_epsilon,
+               "epsilons": list(frozen.epsilons), "max_adjacent_step_absolute_difference": float(absolute.max()),
+               "max_adjacent_step_relative_difference": float(relative.max()),
+               "schema": frozen.metadata["schema"], "contact_trace_shape": list(frozen.contact_trace.shape),
+               "contact_pair_observations": len(frozen.contact_trace.geometry_pairs),
+               "contact_sampling": "native-command ends only; physics substeps not traced",
+               "meaning": "finite central responses; step-size diagnostics are not proof of differentiability"}, "json")
+
+
+@cappa.command(name="freeze-recorded-controller-reference-derivatives")
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class FreezeRecordedControllerReferenceDerivatives(DataclassRecord):
+    """Freeze physical responses at actual foreign recorded intervals, without changing gear."""
+
+    recordings: Annotated[str, cappa.Arg(long=True)]
+    source_layout: Annotated[RecordedReferenceLayout, cappa.Arg(long=True)]
+    reference_file: Annotated[Path, cappa.Arg(long=True)]
+    epsilons: Annotated[str, cappa.Arg(long=True)]
+    selected_epsilon: Annotated[float, cappa.Arg(long=True)]
+    direction_seed: Annotated[int, cappa.Arg(long=True)]
+    physical_precision: Annotated[str, cappa.Arg(long=True)]
+    out: Annotated[Path, cappa.Arg(long=True)]
+    factors: Annotated[str | None, cappa.Arg(long=True)] = None
+
+    def __call__(self) -> None:
+        from .controller_fork_bank import (IndependentControllerReferenceSource,
+            MatchedControllerReferenceSource, RecordedDerivativePrecision, RecordedDerivativeSettings,
+            freeze_recorded_controller_reference_derivatives)
+
+        paths = tuple(Path(token.strip()) for token in self.recordings.split(",") if token.strip())
+        if self.source_layout is RecordedReferenceLayout.INDEPENDENT_EPISODES:
+            if len(paths) != 1 or self.factors is not None:
+                raise ValueError("independent references require one actual source and no per-manifest factors")
+            source = IndependentControllerReferenceSource(paths[0])
+        else:
+            if self.factors is None:
+                raise ValueError("matched references require the recorded factors to identify their source files")
+            source = MatchedControllerReferenceSource(paths, tuple(float(value) for value in self.factors.split(",")))
+        settings = RecordedDerivativeSettings(tuple(float(value) for value in self.epsilons.split(",")),
+            self.selected_epsilon, self.direction_seed, RecordedDerivativePrecision(self.physical_precision))
+        result = freeze_recorded_controller_reference_derivatives(source, reference_file=self.reference_file,
+            settings=settings, output=self.out)
+        difference = np.abs(result.responses[:, 1:] - result.responses[:, :-1])
+        _emit({"path": str(self.out.resolve()), "schema": result.metadata["schema"],
+            "references": len(result.directions), "response_shape": list(result.responses.shape),
+            "selected_epsilon": settings.selected_epsilon, "epsilons": list(settings.epsilons),
+            "physical_precision": settings.physical_precision.value,
+            "max_adjacent_step_absolute_difference": float(difference.max()),
+            "reference_gear_regenerated": False, "query_inputs_used": False,
+            "meaning": "actual R central responses; finite steps do not establish differentiability"}, "json")
+
+
 @cappa.command(name="serie")
-@attrs.define
-class Serie:
+@dataclass(frozen=False, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class Serie(DataclassRecord):
     """SERIE: generate controlled time-series cells and demos."""
 
     cmd: cappa.Subcommands[
@@ -1516,6 +1710,10 @@ class Serie:
         | List
         | DataDir
         | Generate
+        | FreezeControllerCandidateBank
+        | FreezeRecordedControllerReferences
+        | FreezeControllerReferenceDerivatives
+        | FreezeRecordedControllerReferenceDerivatives
         | Walkthrough
         | Demo
         | Version

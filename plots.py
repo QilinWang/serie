@@ -7,11 +7,12 @@ training results, prediction windows, or model internals.
 
 from __future__ import annotations
 
+from msgspec.structs import replace
+
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import numpy as np
-from attrs import evolve
 
 from .api import build_dgp_bank
 from .specs import ShockEvent, ShockSchedule, TrajectorySpec, DGPBank
@@ -23,7 +24,6 @@ CLEAN_COLOR = "#56B4E9"
 NOISY_COLOR = "#E69F00"
 REFERENCE_COLOR = "#D55E00"
 CLEAN_CMAP = "Blues"
-NOISY_CMAP = "Oranges"
 
 
 def _import_matplotlib() -> tuple[Any, Any, Any, Any]:
@@ -82,7 +82,7 @@ def _shock_events(source: TrajectorySpec | None) -> tuple[ShockEvent, ...]:
 def _unshocked_reference_source(source: TrajectorySpec | None) -> TrajectorySpec | None:
     if source is None or source.shocks.is_stationary:
         return None
-    return evolve(source, shocks=ShockSchedule.none())
+    return replace(source, shocks=ShockSchedule.none())
 
 
 def _title(*, bank: DGPBank, sigma: float, source: TrajectorySpec | None) -> str:

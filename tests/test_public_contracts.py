@@ -22,11 +22,12 @@ This file covers the gaps between those two:
 
 from __future__ import annotations
 
+from msgspec.structs import replace
+
 import json
 
 import numpy as np
 import pytest
-from attrs import evolve
 
 from serie import (
     PartitionSpec,
@@ -39,9 +40,9 @@ from serie import (
     inject_noise,
 )
 from serie.integrators import generate_from_trajectory_spec
+from serie.pipeline import PartitionStats
 
 
-# Small, fast specs for unit tests.
 def small_lorenz(steps: int = 400) -> TrajectorySpec:
     return TrajectorySpec.lorenz(steps=steps)
 
@@ -65,7 +66,7 @@ class TestPartitionSpecFields:
         assert p.test_start == 0.9
         assert p.test_end == 1.0
 
-    def test_custom_partition_round_trips(self):
+    def test_custom_partition_keeps_train_validation_boundary(self):
         p = PartitionSpec(
             train_start=0.0,
             train_end=0.6,
@@ -91,9 +92,17 @@ class TestPartitionSpecFields:
 class TestPartitionStatsMethods:
     @pytest.fixture()
     def stats(self):
-        bank = build_dgp_bank(small_lorenz(), seed=0, verbose=False)
-        split = inject_noise(bank, sigma=0.0, partition=PartitionSpec.p70_20_10())
-        return split.train_stats
+        def values(first, second):
+            return np.array([first, second], dtype=np.float32)
+
+        return PartitionStats(
+            mean=values(1, 2), std=values(3, 4),
+            median=values(5, 6), mad=values(7, 8),
+            q01=values(-5, -4), q05=values(-3, -2),
+            q25=values(-1, 0), q75=values(9, 10),
+            q95=values(11, 12), q99=values(13, 14),
+            max_=values(15, 16), min_=values(-7, -6), counts=10,
+        )
 
     def test_standard_returns_mean_and_std(self, stats):
         center, spread = stats.center_and_spread("standard")
@@ -114,6 +123,11 @@ class TestPartitionStatsMethods:
         center, spread = stats.center_and_spread("center_mean")
         np.testing.assert_array_equal(center, stats.mean)
         np.testing.assert_array_equal(spread, np.ones_like(stats.mean, dtype=np.float32))
+
+    def test_center_median_returns_median_and_ones(self, stats):
+        center, spread = stats.center_and_spread("center_median")
+        np.testing.assert_array_equal(center, stats.median)
+        np.testing.assert_array_equal(spread, np.ones_like(stats.median, dtype=np.float32))
 
     def test_none_returns_zeros_and_ones(self, stats):
         center, spread = stats.center_and_spread("none")
@@ -250,19 +264,19 @@ class TestDiagonalGroundTruth:
 
 
 class TestGradualTransition:
-    def test_stepped_transition_diverges_more_gradually_than_abrupt(self):
+    def test_stepped_and_abrupt_transitions_preserve_pre_shock_and_change_post_shock(self):
         from serie.catalog import LorenzParams
 
         base = small_lorenz(steps=600)
         after = LorenzParams(sigma=10.5, rho=29.0, beta=8.5 / 3.0)
 
-        abrupt = evolve(
+        abrupt = replace(
             base,
             shocks=ShockSchedule.single(
                 ShockEvent.params_step_change(params_after=after, t_start=0.3)
             ),
         )
-        gradual = evolve(
+        gradual = replace(
             base,
             shocks=ShockSchedule.single(
                 ShockEvent.params_stepped_transition(
@@ -330,6 +344,10 @@ class TestFeatureNames:
     def test_synthetic_bank_has_auto_feature_names(self):
         bank = build_dgp_bank(small_lorenz(), seed=0, verbose=False)
         assert bank.feature_names == ("f0", "f1", "f2")
+
+    def test_one_dimensional_synthetic_bank_has_auto_feature_name(self):
+        bank = build_dgp_bank(small_ou(), seed=0, verbose=False)
+        assert bank.feature_names == ("f0",)
 
     def test_feature_names_survive_inject_noise(self):
         bank = build_dgp_bank(small_lorenz(), seed=0, verbose=False)

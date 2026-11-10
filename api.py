@@ -9,6 +9,9 @@ Functions / 函数:
     iter_cells(bank, plan) → Iterator[TitrationCell]
     build_clean_split_bundle(bank, ...) → DataBundle
     build_noisy_bundle_for_cell(bank, ...) → DataBundle
+    materialize_cell(bank, spec) → MaterializedCell
+    save_materialized_cell(cell, path) → dict
+    load_materialized_cell(path) → MaterializedCell
     export_dgp_bank_files(bank, out_dir) → dict
     dgp_bank_from_tensors(tensors) → DGPBank
     known_asset_paths(meta) → list[Path]
@@ -22,18 +25,26 @@ from dataclasses import dataclass
 from decimal import Decimal
 import json
 import logging
+import os
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Literal
+import msgspec
 import numpy as np
 import polars as pl
 
 from .data import KnownCleanConfig, KnownLoadMode, SplitTimeSeriesData, load_data
+from .noise import ObservationNoiseProcess, impose_temporal_dependence
 from .pipeline import (
     DataBundle,
     KnownDataID,
     KnownMeta,
     PartitionSpec,
+    PartitionStats,
     DrawDesign,
+    SigmaScale,
+    SplitTreatmentScheme,
     StageComputeSplitStats,
     StageInjectNoise,
     StageInjectTrainScaledNoise,
@@ -44,6 +55,7 @@ from .pipeline import (
 )
 from ._version import PROTOCOL_VERSION, __version__
 from .specs import TitrationCell, TrajectorySpec, DGPBank, spawn_draw_seeds
+from .state_impulse_plan import StateImpulseSource
 
 logger = logging.getLogger(__name__)
 
@@ -178,8 +190,14 @@ def _plan_counts_for_export(
     return bank.n_trajectory_draws, bank.n_noise_draws
 
 
-def _resolve_source(source) -> TrajectorySpec | KnownMeta | KnownDataID:
+def _resolve_source(source) -> TrajectorySpec | StateImpulseSource | KnownMeta | KnownDataID:
     """Convert a string system name to TrajectorySpec via catalog preset, or pass through."""
+    # CHG 2026-08-29: KnownDataID is a StrEnum, so the `str` branch below used to
+    # capture it and look a recorded dataset up as a simulator preset ("Unknown
+    # system name <KnownDataID.ETTH1: 'etth1'>"). The typed sources are checked
+    # first; a bare string is the only thing that goes through the catalog.
+    if isinstance(source, (TrajectorySpec, StateImpulseSource, KnownMeta, KnownDataID)):
+        return source
     if isinstance(source, str):
         from .catalog import list_sources, source_preset
 
@@ -192,12 +210,12 @@ def _resolve_source(source) -> TrajectorySpec | KnownMeta | KnownDataID:
                 f"Valid names: {valid}. "
                 f"Or pass a TrajectorySpec, KnownMeta, or KnownDataID directly."
             ) from exc
-    if isinstance(source, (TrajectorySpec, KnownMeta, KnownDataID)):
+    if isinstance(source, (TrajectorySpec, StateImpulseSource, KnownMeta, KnownDataID)):
         return source
     raise TypeError(
-        f"source must be str, TrajectorySpec, KnownMeta, or KnownDataID, got {type(source).__name__}. "
+        f"source must be str, TrajectorySpec, StateImpulseSource, KnownMeta, or KnownDataID, got {type(source).__name__}. "
         f"Examples: build_dgp_bank('lorenz'), build_dgp_bank(TrajectorySpec.lorenz()), "
-        f"build_dgp_bank(KnownMeta.etth1())"
+        f"build_dgp_bank(KnownMeta.etth1(), seed=0)"
     )
 
 
@@ -254,8 +272,137 @@ def known_asset_paths(meta: KnownMeta) -> list[Path]:
 # standard deviation. Custom laws may use any known scale; then `sigma` is a raw
 # multiplier and the draw distribution owns the physical scale.
 NoiseSampler = Callable[[np.random.Generator, tuple[int, ...]], np.ndarray]
-SigmaScale = Literal["unit", "train_std"]
 ArrayFormat = Literal["npy", "csv", "ipc", "parquet", "table", "safetensors", "all"]
+
+MATERIALIZED_CELL_SCHEMA = "serie.materialized_cell_safetensors.v1"
+_PARTITION_STATS_ARRAY_FIELDS = (
+    "mean",
+    "std",
+    "median",
+    "mad",
+    "q01",
+    "q05",
+    "q25",
+    "q75",
+    "q95",
+    "q99",
+    "max_",
+    "min_",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CellMaterializationSpec:
+    """Model-independent coordinates for one Serie data realization.
+
+    A notebook, training system, or another package may construct this type,
+    but transport-specific request fields never enter Serie's API. Forecast
+    context/horizon and model identity are deliberately absent: they are
+    downstream training geometry, not properties of the materialized series.
+    """
+
+    trajectory_draw_ordinal: int
+    noise_draw_ordinal: int
+    sigma: np.float32
+    partition: PartitionSpec
+    split_treatment: SplitTreatmentScheme
+    sigma_scale: SigmaScale
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.trajectory_draw_ordinal, bool)
+            or not isinstance(self.trajectory_draw_ordinal, (int, np.integer))
+            or self.trajectory_draw_ordinal < 0
+        ):
+            raise ValueError("trajectory_draw_ordinal must be a non-negative integer")
+        if (
+            isinstance(self.noise_draw_ordinal, bool)
+            or not isinstance(self.noise_draw_ordinal, (int, np.integer))
+            or self.noise_draw_ordinal < 0
+        ):
+            raise ValueError("noise_draw_ordinal must be a non-negative integer")
+        object.__setattr__(self, "trajectory_draw_ordinal", int(self.trajectory_draw_ordinal))
+        object.__setattr__(self, "noise_draw_ordinal", int(self.noise_draw_ordinal))
+        sigma = np.float32(self.sigma)
+        if not np.isfinite(sigma) or sigma < 0:
+            raise ValueError("sigma must be a finite non-negative f32 value")
+        object.__setattr__(self, "sigma", sigma)
+        object.__setattr__(self, "split_treatment", SplitTreatmentScheme(self.split_treatment))
+        object.__setattr__(self, "sigma_scale", SigmaScale(self.sigma_scale))
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class MaterializedCell:
+    """One immutable, model-independent Serie cell ready for downstream views.
+
+    Arrays remain full-series ``[T,D]`` values. A trainer may derive windows or
+    dataloaders from them, but it must not repeat draw selection, partitioning,
+    dose scaling, or split treatment.
+    """
+
+    spec: CellMaterializationSpec
+    cell: TitrationCell
+    clean: np.ndarray
+    observed: np.ndarray
+    unit_noise: np.ndarray
+    split_indices: tuple[int, int, int, int, int, int]
+    clean_train_stats: PartitionStats
+    clean_val_stats: PartitionStats
+    clean_test_stats: PartitionStats
+    feature_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        clean = np.ascontiguousarray(self.clean, dtype=np.float32)
+        observed = np.ascontiguousarray(self.observed, dtype=np.float32)
+        unit_noise = np.ascontiguousarray(self.unit_noise, dtype=np.float32)
+        if clean.ndim != 2 or observed.shape != clean.shape or unit_noise.shape != clean.shape:
+            raise ValueError(
+                "materialized cell clean, observed, and unit_noise must share one [T,D] shape"
+            )
+        if len(self.split_indices) != 6:
+            raise ValueError("materialized cell split_indices must contain six boundaries")
+        if tuple(self.feature_names) and len(self.feature_names) != clean.shape[1]:
+            raise ValueError("materialized cell feature_names must match the channel axis")
+        if self.cell.T != clean.shape[0] or self.cell.D != clean.shape[1]:
+            raise ValueError("materialized cell provenance shape does not match its arrays")
+        if self.cell.trajectory_draw_ordinal != self.spec.trajectory_draw_ordinal:
+            raise ValueError("materialized cell trajectory draw disagrees with its spec")
+        if self.cell.noise_draw_ordinal != self.spec.noise_draw_ordinal:
+            raise ValueError("materialized cell noise draw disagrees with its spec")
+        if np.float32(self.cell.noise_level) != self.spec.sigma:
+            raise ValueError("materialized cell dose disagrees with its spec")
+        expected_split_indices = tuple(
+            int(clean.shape[0] * fraction)
+            for fraction in (
+                self.spec.partition.train_start,
+                self.spec.partition.train_end,
+                self.spec.partition.val_start,
+                self.spec.partition.val_end,
+                self.spec.partition.test_start,
+                self.spec.partition.test_end,
+            )
+        )
+        split_indices = tuple(int(value) for value in self.split_indices)
+        if split_indices != expected_split_indices:
+            raise ValueError("materialized cell split indices disagree with its partition spec")
+        for label, stats, start, end in (
+            ("train", self.clean_train_stats, split_indices[0], split_indices[1]),
+            ("val", self.clean_val_stats, split_indices[2], split_indices[3]),
+            ("test", self.clean_test_stats, split_indices[4], split_indices[5]),
+        ):
+            if int(stats.counts) != end - start or any(
+                np.asarray(getattr(stats, field)).shape != (clean.shape[1],)
+                for field in _PARTITION_STATS_ARRAY_FIELDS
+            ):
+                raise ValueError(f"materialized cell {label} statistics disagree with its split")
+        clean.setflags(write=False)
+        observed.setflags(write=False)
+        unit_noise.setflags(write=False)
+        object.__setattr__(self, "clean", clean)
+        object.__setattr__(self, "observed", observed)
+        object.__setattr__(self, "unit_noise", unit_noise)
+        object.__setattr__(self, "split_indices", split_indices)
+        object.__setattr__(self, "feature_names", tuple(self.feature_names))
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +442,10 @@ class DGPBankTensors:
         """Noisy cell tensor names stored in this artifact."""
         return tuple(name for name in self.tensors if name.startswith("noisy_sigma_"))
 
+# Pinned before any result was seen; these are registered constants, not knobs.
+CONTAMINATION_RATE = 0.02
+CONTAMINATION_SCALE = 10.0
+
 _NOISE_KINDS: dict[str, NoiseSampler] = {
     # N(0, 1) — the default of both papers' main protocol.
     "gaussian": lambda rng, shape: rng.standard_normal(shape, dtype=np.float32),
@@ -303,6 +454,24 @@ _NOISE_KINDS: dict[str, NoiseSampler] = {
     "laplace": lambda rng, shape: rng.laplace(loc=0.0, scale=1.0 / np.sqrt(2.0), size=shape).astype(
         np.float32
     ),
+    # Student-t (nu=3) scaled by sqrt((nu-2)/nu) = sqrt(1/3) has variance one,
+    # like the Gaussian path, so noise_level remains a std-scale intervention
+    # under an exactly known heavy-tailed law (infinite fourth moment).
+    "student_t3": lambda rng, shape: (rng.standard_t(3, size=shape) * np.sqrt(1.0 / 3.0)).astype(
+        np.float32
+    ),
+    # Huber's gross-error model, variance-matched. Two per cent of readings are
+    # multiplied by ten and the whole draw is divided by
+    # sqrt((1-eps) + eps k^2), giving variance one like every other law. This
+    # is NOT another rung of the tail ladder: Laplace and Student-t3 make every
+    # reading heavier-tailed, while contamination leaves 98% of them clean and
+    # makes a few enormous. Kurtosis is about 68 but FINITE, so unlike
+    # Student-t3 its squared-error intervals are stable.
+    "contaminated": lambda rng, shape: (
+        np.where(rng.random(shape) < CONTAMINATION_RATE, CONTAMINATION_SCALE, 1.0)
+        * rng.standard_normal(shape)
+        / np.sqrt((1.0 - CONTAMINATION_RATE) + CONTAMINATION_RATE * CONTAMINATION_SCALE**2)
+    ).astype(np.float32),
 }
 
 
@@ -342,6 +511,36 @@ def _draw_noise_draws(
     ).astype(np.float32, copy=False)
 
 
+def _materialize_observation_noise(
+    *,
+    noise_draw_seeds: tuple[int, ...],
+    shape: tuple[int, int],
+    noise_kind: str | NoiseSampler,
+    noise_ar1_phi: float,
+) -> tuple[np.ndarray, str]:
+    """Draw innovations and apply the one validated temporal process."""
+
+    if callable(noise_kind):
+        if noise_ar1_phi != 0.0:
+            raise ValueError("custom observation-noise laws currently require noise_ar1_phi=0")
+        return (
+            _draw_noise_draws(
+                noise_draw_seeds=noise_draw_seeds,
+                shape=shape,
+                noise_kind=noise_kind,
+            ),
+            "custom",
+        )
+
+    process = ObservationNoiseProcess.from_wire(noise_kind, noise_ar1_phi)
+    innovations = _draw_noise_draws(
+        noise_draw_seeds=noise_draw_seeds,
+        shape=shape,
+        noise_kind=process.innovation_kind.value,
+    )
+    return impose_temporal_dependence(innovations, process), process.innovation_kind.value
+
+
 def _require_split_bundle(db: DataBundle, *, context: str) -> None:
     missing = []
     if db.series is None:
@@ -361,7 +560,7 @@ def _require_split_bundle(db: DataBundle, *, context: str) -> None:
 
 
 def build_dgp_bank(
-    source: str | TrajectorySpec | KnownMeta | KnownDataID,
+    source: str | TrajectorySpec | StateImpulseSource | KnownMeta | KnownDataID,
     *,
     seed: int = 0,
     mode: KnownLoadMode = KnownLoadMode.CLEAN,
@@ -370,6 +569,7 @@ def build_dgp_bank(
     n_noise_draws: int = 1,
     noise_seed_base: int = 1000,
     noise_kind: str | NoiseSampler = "gaussian",
+    noise_ar1_phi: float = 0.0,
     verbose: bool = False,
 ) -> DGPBank:
     """Generate clean trajectories and reusable noise draws once.
@@ -379,7 +579,9 @@ def build_dgp_bank(
             - str: system name like "lorenz", "ou", "slds" (uses catalog preset)
             - TrajectorySpec: explicit spec with custom parameters
             - KnownMeta / KnownDataID: a staged recorded dataset
-        seed: Random seed for trajectory generation.
+        seed: Root seed for generated trajectory draws. Fixed ``KnownMeta`` /
+            ``KnownDataID`` recordings must pass ``0`` explicitly: they have
+            no generative trajectory seed to vary.
         n_trajectory_draws: Number of independent trajectories to generate.
         n_noise_draws: Number of independent noise draws to pre-generate.
         noise_seed_base: Base seed for noise draw generation.
@@ -394,6 +596,9 @@ def build_dgp_bank(
             then `sigma` is a raw multiplier and the draw distribution owns the
             scale. The hard requirement for NLL/PIT/coverage-style tests is
             that the injected law is exactly known and reported.
+        noise_ar1_phi: Temporal structure for built-in Gaussian innovations.
+            Zero means IID. A nonzero value must lie strictly inside (-1, 1)
+            and applies the stationary variance-preserving AR(1) recurrence.
 
     Returns:
         DGPBank with .clean [N_trajectory, T, D] and .noise_draws [N_noise, T, D].
@@ -405,13 +610,35 @@ def build_dgp_bank(
         >>> bank.T, bank.D    # (5001, 1)
         >>> bank = build_dgp_bank("ou", noise_kind="laplace")    # heavy-tailed
     """
+    requested_source_name = source.lower().replace("-", "_") if isinstance(source, str) else None
     source = _resolve_source(source)
 
-    if isinstance(source, TrajectorySpec):
+    source_declaration = None
+    if isinstance(source, StateImpulseSource) and n_trajectory_draws != 1:
+        raise ValueError(
+            "StateImpulseSource freezes one realized event schedule; create an explicitly named source "
+            "for each independent schedule instead of requesting multiple trajectory draws"
+        )
+    if isinstance(source, StateImpulseSource):
+        source_declaration = json.dumps({
+            "schema": "serie.state_impulse_source.v1",
+            "dataset_id": source.dataset_id,
+            "trajectory_spec": msgspec.to_builtins(source.trajectory_spec),
+            "realization": msgspec.to_builtins(source.realization),
+        }, sort_keys=True, separators=(",", ":"))
+
+    # CHG: a named, frozen state-impulse source uses the same trajectory draw
+    # protocol while preserving its own source_id and declared event metadata.
+    if isinstance(source, (TrajectorySpec, StateImpulseSource)):
         trajectory_draw_seeds = spawn_draw_seeds(seed, n_trajectory_draws)
         series = [load_data(source, seed=s) for s in trajectory_draw_seeds]
         trajectory_seed_base = seed
     elif isinstance(source, (KnownMeta, KnownDataID)):
+        if seed != 0:
+            raise ValueError(
+                "Known data is a fixed recording and requires trajectory_seed_base=0; "
+                f"got seed={seed}. Pass seed=0 explicitly."
+            )
         if n_trajectory_draws != 1:
             raise ValueError(
                 f"Known data supports exactly n_trajectory_draws=1, got {n_trajectory_draws}. "
@@ -419,29 +646,35 @@ def build_dgp_bank(
             )
         series = [load_data(source, mode=mode, cleaning=cleaning)]
         trajectory_seed_base = 0
-        trajectory_draw_seeds = (0,)
+        # CHG 2026-08-29: was the literal (0,), which DGPBank refuses because the
+        # draw seed of ordinal 0 under base 0 is spawn_draw_seeds(0, 1)[0] by the
+        # Serie draw protocol — the same value the Fern compiler requires in a
+        # recorded world's grid. A recording has one draw; its seed is still derived.
+        trajectory_draw_seeds = spawn_draw_seeds(0, 1)
     else:
         raise TypeError(f"Unsupported source type after coercion: {type(source)!r}")
 
     clean = np.stack([np.ascontiguousarray(ds.values, dtype=np.float32) for ds in series])
     _, T, D = clean.shape
     noise_draw_seeds = spawn_draw_seeds(noise_seed_base, n_noise_draws)
-    noise_draws = _draw_noise_draws(
+    noise_draws, noise_kind_name = _materialize_observation_noise(
         noise_draw_seeds=noise_draw_seeds,
         shape=(T, D),
         noise_kind=noise_kind,
+        noise_ar1_phi=noise_ar1_phi,
     )
 
+    bank_name = requested_source_name or series[0].source_id
     if verbose:
         logger.info(
             "built dgp bank %s: clean=%s noise=%s",
-            series[0].source_id,
+            bank_name,
             list(clean.shape),
             list(noise_draws.shape),
         )
 
     return DGPBank(
-        name=series[0].source_id,
+        name=bank_name,
         trajectory_seed_base=trajectory_seed_base,
         noise_seed_base=noise_seed_base,
         trajectory_draw_seeds=trajectory_draw_seeds,
@@ -449,8 +682,12 @@ def build_dgp_bank(
         clean=clean,
         noise_draws=noise_draws,
         feature_names=tuple(series[0].feature_names),
-        is_stochastic=source.system.is_stochastic if isinstance(source, TrajectorySpec) else False,
-        noise_kind=noise_kind if isinstance(noise_kind, str) else "custom",
+        is_stochastic=(source.system.is_stochastic if isinstance(source, TrajectorySpec)
+                       else source.trajectory_spec.system.is_stochastic if isinstance(source, StateImpulseSource)
+                       else False),
+        noise_kind=noise_kind_name,
+        noise_ar1_phi=float(noise_ar1_phi),
+        source_declaration=source_declaration,
     )
 
 
@@ -461,6 +698,7 @@ def build_empirical_dgp_bank(
     n_noise_draws: int = 1,
     noise_seed_base: int = 1000,
     noise_kind: str | NoiseSampler = "gaussian",
+    noise_ar1_phi: float = 0.0,
     feature_names: tuple[str, ...] | None = None,
 ) -> DGPBank:
     """Wrap a clean recorded [T, D] array as a one-trajectory-draw DGP bank.
@@ -478,6 +716,8 @@ def build_empirical_dgp_bank(
         n_noise_draws: Number of frozen noise draws. 冻结噪声抽取数量。
         noise_seed_base: Base seed for noise. 噪声基础种子。
         noise_kind: "gaussian", "laplace", or callable. 噪声类型。
+        noise_ar1_phi: Zero for IID, or a stationary Gaussian AR(1)
+            coefficient strictly inside (-1, 1).
         feature_names: Optional channel names. 可选通道名称。
 
     Returns / 返回:
@@ -500,10 +740,11 @@ def build_empirical_dgp_bank(
     _, T, D = clean.shape
     trajectory_draw_seeds = spawn_draw_seeds(0, 1)
     noise_draw_seeds = spawn_draw_seeds(noise_seed_base, n_noise_draws)
-    noise_draws = _draw_noise_draws(
+    noise_draws, noise_kind_name = _materialize_observation_noise(
         noise_draw_seeds=noise_draw_seeds,
         shape=(T, D),
         noise_kind=noise_kind,
+        noise_ar1_phi=noise_ar1_phi,
     )
     names = feature_names or tuple(f"f{i}" for i in range(D))
     if len(names) != D:
@@ -519,8 +760,50 @@ def build_empirical_dgp_bank(
         noise_draws=noise_draws,
         feature_names=tuple(names),
         is_stochastic=False,
-        noise_kind=noise_kind if isinstance(noise_kind, str) else "custom",
+        noise_kind=noise_kind_name,
+        noise_ar1_phi=float(noise_ar1_phi),
     )
+
+
+def _rewrite_safetensors_with_canonical_header(path: Path) -> None:
+    """Rewrite one safetensors header in stable JSON key order without loading its tensors."""
+
+    with path.open("rb") as source:
+        header_length_bytes = source.read(8)
+        if len(header_length_bytes) != 8:
+            raise ValueError(f"safetensors file has a truncated header length: {path}")
+        header_length = int.from_bytes(header_length_bytes, "little")
+        header_bytes = source.read(header_length)
+        if len(header_bytes) != header_length:
+            raise ValueError(f"safetensors file has a truncated header: {path}")
+        header = json.loads(header_bytes)
+        if not isinstance(header, dict):
+            raise ValueError(f"safetensors header must be an object: {path}")
+        canonical_header = json.dumps(
+            header,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        canonical_header += b" " * (-len(canonical_header) % 8)
+
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".canonical.tmp",
+            dir=path.parent,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(file_descriptor, "wb") as destination:
+                destination.write(len(canonical_header).to_bytes(8, "little"))
+                destination.write(canonical_header)
+                shutil.copyfileobj(source, destination, length=1024 * 1024)
+                destination.flush()
+                os.fsync(destination.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
 
 def export_dgp_bank_safetensors(
@@ -631,8 +914,18 @@ def export_dgp_bank_safetensors(
         "noisy": noisy_entries,
         "tensors": sorted(tensors),
     }
+    if bank.source_declaration is not None:
+        metadata["source_declaration"] = json.loads(bank.source_declaration)
+    if bank.noise_kind != "custom":
+        metadata.update(
+            ObservationNoiseProcess.from_wire(
+                bank.noise_kind,
+                bank.noise_ar1_phi,
+            ).artifact_metadata()
+        )
     header_metadata = {key: json.dumps(value) if not isinstance(value, str) else value for key, value in metadata.items()}
     save_file(tensors, str(path), metadata=header_metadata)
+    _rewrite_safetensors_with_canonical_header(path)
     return metadata
 
 
@@ -730,6 +1023,11 @@ def dgp_bank_from_tensors(tensors: DGPBankTensors) -> DGPBank:
         feature_names=tensors.feature_names,
         is_stochastic=bool(json.loads(required_metadata("is_stochastic"))),
         noise_kind=required_metadata("noise_kind"),
+        noise_ar1_phi=float(metadata.get("noise_ar1_phi", "0")),
+        source_declaration=(
+            json.dumps(json.loads(metadata["source_declaration"]), sort_keys=True, separators=(",", ":"))
+            if "source_declaration" in metadata else None
+        ),
     )
 
 
@@ -937,6 +1235,15 @@ def export_dgp_bank_files(
         "files": files,
         "noisy": noisy_entries,
     }
+    if bank.source_declaration is not None:
+        manifest["source_declaration"] = json.loads(bank.source_declaration)
+    if bank.noise_kind != "custom":
+        manifest.update(
+            ObservationNoiseProcess.from_wire(
+                bank.noise_kind,
+                bank.noise_ar1_phi,
+            ).artifact_metadata()
+        )
     _write_json(out / "manifest.json", manifest, overwrite=overwrite)
     return manifest
 
@@ -948,32 +1255,30 @@ def _inject_noise_unit(
     partition: PartitionSpec,
     trajectory_draw_ordinal: int = 0,
     noise_draw_ordinal: int = 0,
+    split_treatment_scheme: SplitTreatmentScheme = SplitTreatmentScheme.NOISE_MATCHED_RETRAINING,
     print_diagnostics: bool = False,
 ) -> SplitTimeSeriesData:
-    """Unit-scaled observation-noise injection implementation."""
+    """Unit-scaled observation-noise injection through the shared split scheme."""
     cell = bank.cell(
         noise_level=noise_level,
         trajectory_draw_ordinal=trajectory_draw_ordinal,
         noise_draw_ordinal=noise_draw_ordinal,
     )
-    noisy = np.ascontiguousarray(
-        bank.build_observed_series(
-            noise_level=noise_level,
-            trajectory_draw_ordinal=trajectory_draw_ordinal,
-            noise_draw_ordinal=noise_draw_ordinal,
-        ),
-        dtype=np.float32,
+    db_clean = build_clean_split_bundle(
+        bank,
+        trajectory_draw_ordinal=trajectory_draw_ordinal,
+        partition_spec=partition,
+        print_diagnostics=False,
     )
-    db = (
-        DataBundle()
-        | StageLoadTensor(
-            data=noisy,
-            dataset_id=cell.tag,
-            feature_names=bank.feature_names,
-        )
-        | StageSplitByFraction(partition_spec=partition)
-        | StageComputeSplitStats()
+    db = build_noisy_bundle_for_cell(
+        bank,
+        db_clean,
+        cell,
+        scale_noise_by_std=False,
+        split_treatment_scheme=split_treatment_scheme,
     )
+    db.dataset_id = cell.tag
+    db = db | StageComputeSplitStats()
     if print_diagnostics:
         db = db | StagePrintDiagnostics()
 
@@ -1002,6 +1307,7 @@ def _inject_noise_unit(
             "cell_tag": cell.tag,
             "sigma": float(cell.noise_level),
             "sigma_scale": "unit",
+            "split_treatment_scheme": split_treatment_scheme.value,
             "trajectory_draw_ordinal": int(cell.trajectory_draw_ordinal),
             "noise_draw_ordinal": int(cell.noise_draw_ordinal),
             "trajectory_seed_base": int(cell.trajectory_seed_base),
@@ -1016,25 +1322,49 @@ def inject_noise(
     bank: DGPBank,
     *,
     sigma: float = 0.0,
-    sigma_scale: SigmaScale = "unit",
+    sigma_scale: SigmaScale = SigmaScale.UNIT,
     partition: PartitionSpec | None = None,
     trajectory_draw_ordinal: int = 0,
     noise_draw_ordinal: int = 0,
+    split_treatment_scheme: SplitTreatmentScheme = SplitTreatmentScheme.NOISE_MATCHED_RETRAINING,
     print_diagnostics: bool = False,
 ) -> SplitTimeSeriesData:
-    """Inject one noise dose (sigma) and return train/val/test arrays.
-    注入一个噪声剂量（sigma）并返回训练/验证/测试数组。"""
+    """Inject one noise dose and return chronological train/val/test arrays.
+
+    ``split_treatment_scheme`` is converted immediately to the bounded
+    :class:`SplitTreatmentScheme` enum.  The default preserves Fern's original
+    noise-matched retraining behavior (noise on all splits).  For clean
+    selection regret, pass
+    ``CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION``: train and validation remain
+    bitwise clean and only test receives ``sigma``.  This option establishes
+    the data contract; CSR itself is later computed across candidate models by
+    freezing the dose-zero validation choice and measuring its test-dose
+    regret relative to the per-dose best candidate.
+
+    ``NOISE_TRAIN_NOISE_SELECT_CLEAN_TEST`` applies ``sigma`` to train and
+    validation while leaving test clean.  With the matching dose-specific
+    noise-matched checkpoint, this asks whether adaptation to noisy
+    measurements preserves prediction of the clean dynamics.
+
+    Noise injection and the later WIS, coverage, Energy, and Variogram scores
+    are direct arithmetic evaluations.  None requires gradient descent.
+    Gradient descent is used only if the forecasting model's own fitting
+    procedure calls for it.
+    """
     partition = partition or PartitionSpec.p70_20_10()
-    if sigma_scale == "unit":
+    sigma_scale = SigmaScale(sigma_scale)
+    split_treatment_scheme = SplitTreatmentScheme(split_treatment_scheme)
+    if sigma_scale is SigmaScale.UNIT:
         return _inject_noise_unit(
             bank,
             noise_level=sigma,
             partition=partition,
             trajectory_draw_ordinal=trajectory_draw_ordinal,
             noise_draw_ordinal=noise_draw_ordinal,
+            split_treatment_scheme=split_treatment_scheme,
             print_diagnostics=print_diagnostics,
         )
-    if sigma_scale != "train_std":
+    if sigma_scale is not SigmaScale.TRAIN_STD:
         raise ValueError("sigma_scale must be 'unit' or 'train_std'")
 
     # train_std scaling requires TWO passes:
@@ -1057,6 +1387,7 @@ def inject_noise(
         db_clean,
         cell,
         scale_noise_by_std=True,
+        split_treatment_scheme=split_treatment_scheme,
     )
     db_noisy = db_noisy | StageComputeSplitStats()
     if print_diagnostics:
@@ -1087,6 +1418,7 @@ def inject_noise(
             "cell_tag": cell.tag,
             "sigma": float(cell.noise_level),
             "sigma_scale": "train_std",
+            "split_treatment_scheme": split_treatment_scheme.value,
             "trajectory_draw_ordinal": int(cell.trajectory_draw_ordinal),
             "noise_draw_ordinal": int(cell.noise_draw_ordinal),
             "trajectory_seed_base": int(cell.trajectory_seed_base),
@@ -1151,12 +1483,15 @@ def build_noisy_bundle_for_cell(
     cell: TitrationCell,
     *,
     scale_noise_by_std: bool = False,
+    split_treatment_scheme: SplitTreatmentScheme = SplitTreatmentScheme.NOISE_MATCHED_RETRAINING,
 ) -> DataBundle:
-    """Return a noisy NumPy `DataBundle` before any downstream windowing.
+    """Return a scheme-treated NumPy `DataBundle` before downstream windowing.
 
     Stage:
     - input: clean split/stats `DataBundle`
-    - output: same bundle shape, but `series` now holds the noisy `[T, D]`
+    - output: same bundle shape, with noise on all rows (historical matched
+      retraining), test rows only (CSR), or train/validation rows only
+      (return-to-clean), as selected by the typed scheme
 
     Not included:
     - no windowing
@@ -1173,16 +1508,329 @@ def build_noisy_bundle_for_cell(
             "Build or fetch the clean split for the same cell.trajectory_draw_ordinal before injecting noise."
         )
     db = copy.copy(db_clean)
+    split_treatment_scheme = SplitTreatmentScheme(split_treatment_scheme)
     noise_draw = np.ascontiguousarray(bank.noise_draws[cell.noise_draw_ordinal], dtype=np.float32)
 
     if scale_noise_by_std:
         db = db | StageInjectTrainScaledNoise(
             noise_level=float(cell.noise_level),
             noise_draw=noise_draw,
+            split_treatment_scheme=split_treatment_scheme,
         )
     else:
         db = db | StageInjectNoise(
             noise_level=float(cell.noise_level),
             noise_draw=noise_draw,
+            split_treatment_scheme=split_treatment_scheme,
         )
     return db
+
+
+def materialize_cell(bank: DGPBank, spec: CellMaterializationSpec) -> MaterializedCell:
+    """Apply one typed Serie cell specification without any Fern dependency."""
+
+    cell = bank.cell(
+        noise_level=float(spec.sigma),
+        trajectory_draw_ordinal=spec.trajectory_draw_ordinal,
+        noise_draw_ordinal=spec.noise_draw_ordinal,
+    )
+    clean_bundle = build_clean_split_bundle(
+        bank,
+        trajectory_draw_ordinal=spec.trajectory_draw_ordinal,
+        partition_spec=spec.partition,
+        print_diagnostics=False,
+    )
+    observed_bundle = build_noisy_bundle_for_cell(
+        bank,
+        clean_bundle,
+        cell,
+        scale_noise_by_std=spec.sigma_scale is SigmaScale.TRAIN_STD,
+        split_treatment_scheme=spec.split_treatment,
+    )
+    if clean_bundle.series is None or observed_bundle.series is None:
+        raise RuntimeError("Serie materialization did not produce clean and observed series")
+    if clean_bundle.indices is None:
+        raise RuntimeError("Serie materialization did not produce split indices")
+    if (
+        clean_bundle.train_partition_stats is None
+        or clean_bundle.val_partition_stats is None
+        or clean_bundle.test_partition_stats is None
+    ):
+        raise RuntimeError("Serie materialization did not produce clean split statistics")
+    return MaterializedCell(
+        spec=spec,
+        cell=cell,
+        clean=clean_bundle.series,
+        observed=observed_bundle.series,
+        unit_noise=bank.noise_draws[spec.noise_draw_ordinal],
+        split_indices=clean_bundle.indices,
+        clean_train_stats=clean_bundle.train_partition_stats,
+        clean_val_stats=clean_bundle.val_partition_stats,
+        clean_test_stats=clean_bundle.test_partition_stats,
+        feature_names=bank.feature_names,
+    )
+
+
+OBSERVED_SERIES_SCHEMA = "serie.observed_series_safetensors.v1"
+
+
+def save_observed_series(db: DataBundle, path: str | Path, *, overwrite: bool = False) -> Path:
+    """Save one observed series, split and measured, so a run reads it back instead of regenerating it.
+
+    The file holds the observed `[T, D]` series, the six split indices, and the three
+    partitions' statistics; the header carries the dataset id, the feature names, the
+    injected level and, when a noise stage named them, the splits that carry the noise.
+    The clean series is not here: it is the raw trajectories' file.
+    """
+    from safetensors.numpy import save_file
+
+    if db.series is None or db.indices is None:
+        raise ValueError("save_observed_series needs a split series: run the split and statistics stages first")
+    if db.train_partition_stats is None or db.val_partition_stats is None or db.test_partition_stats is None:
+        raise ValueError("save_observed_series needs the three partitions' statistics")
+    destination = Path(path)
+    if destination.exists() and not overwrite:
+        raise FileExistsError(f"{destination} already exists; an observed series is never replaced in place")
+    tensors: dict[str, np.ndarray] = {
+        "series": np.ascontiguousarray(db.series, dtype=np.float32),
+        "split_indices": np.asarray(db.indices, dtype=np.int64),
+    }
+    for prefix, stats in (("train", db.train_partition_stats), ("val", db.val_partition_stats), ("test", db.test_partition_stats)):
+        tensors.update(_partition_stats_tensors(prefix, stats))
+    metadata = {
+        "schema": OBSERVED_SERIES_SCHEMA,
+        "dataset_id": str(db.dataset_id),
+        "feature_names": json.dumps(list(db.feature_names or [])),
+        "injected_sigma": json.dumps(db.injected_sigma),
+        "trajectory_draw_ordinal": json.dumps(db.trajectory_draw_ordinal),
+        "split_treatment_scheme": json.dumps(None if db.split_treatment_scheme is None else str(db.split_treatment_scheme)),
+    }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    save_file(tensors, str(destination), metadata=metadata)
+    return destination
+
+
+def load_observed_series(path: str | Path) -> DataBundle:
+    """Read back what `save_observed_series` wrote, as the bundle the windows are cut from."""
+    from safetensors import safe_open
+
+    tensors: dict[str, np.ndarray] = {}
+    with safe_open(str(path), framework="np") as handle:
+        metadata = dict(handle.metadata() or {})
+        for name in handle.keys():
+            tensors[name] = handle.get_tensor(name)
+    if metadata.get("schema") != OBSERVED_SERIES_SCHEMA:
+        raise ValueError(f"{path}: schema {metadata.get('schema')!r} is not {OBSERVED_SERIES_SCHEMA}")
+    indices = tensors["split_indices"]
+    if indices.shape != (6,):
+        raise ValueError(f"{path}: split_indices must be int64[6]")
+    db = DataBundle()
+    db.series = np.ascontiguousarray(tensors["series"], dtype=np.float32)
+    db.indices = tuple(int(i) for i in indices)
+    db.dataset_id = metadata["dataset_id"]
+    names = json.loads(metadata["feature_names"])
+    db.feature_names = names
+    db.channels = int(db.series.shape[1])
+    db.injected_sigma = json.loads(metadata["injected_sigma"])
+    db.trajectory_draw_ordinal = json.loads(metadata["trajectory_draw_ordinal"])
+    scheme = json.loads(metadata["split_treatment_scheme"])
+    db.split_treatment_scheme = None if scheme is None else SplitTreatmentScheme(scheme)
+    db.train_partition_stats = _partition_stats_from_tensors("train", tensors)
+    db.val_partition_stats = _partition_stats_from_tensors("val", tensors)
+    db.test_partition_stats = _partition_stats_from_tensors("test", tensors)
+    return db
+
+
+def _partition_stats_tensors(prefix: str, stats: PartitionStats) -> dict[str, np.ndarray]:
+    tensors = {
+        f"{prefix}_{field.removesuffix('_')}": np.ascontiguousarray(
+            getattr(stats, field), dtype=np.float32
+        )
+        for field in _PARTITION_STATS_ARRAY_FIELDS
+    }
+    count = int(stats.counts)
+    if float(count) != float(stats.counts) or count < 0:
+        raise ValueError(f"{prefix} partition count must be a non-negative integer")
+    tensors[f"{prefix}_count"] = np.asarray([count], dtype=np.int64)
+    return tensors
+
+
+def _partition_stats_from_tensors(prefix: str, tensors: dict[str, np.ndarray]) -> PartitionStats:
+    values = {
+        field: np.ascontiguousarray(tensors[f"{prefix}_{field.removesuffix('_')}"], dtype=np.float32)
+        for field in _PARTITION_STATS_ARRAY_FIELDS
+    }
+    count_tensor = tensors[f"{prefix}_count"]
+    if count_tensor.shape != (1,) or count_tensor.dtype != np.int64:
+        raise ValueError(f"materialized cell {prefix}_count must be int64[1]")
+    return PartitionStats(**values, counts=float(count_tensor[0]))
+
+
+def _partition_manifest(partition: PartitionSpec) -> dict[str, float]:
+    return {
+        "train_start": partition.train_start,
+        "train_end": partition.train_end,
+        "val_start": partition.val_start,
+        "val_end": partition.val_end,
+        "test_start": partition.test_start,
+        "test_end": partition.test_end,
+    }
+
+
+def save_materialized_cell(
+    materialized: MaterializedCell,
+    path: str | Path,
+    *,
+    overwrite: bool = False,
+) -> dict[str, object]:
+    """Write one Serie-owned materialized cell as a single SafeTensors file."""
+
+    try:
+        from safetensors.numpy import save_file
+    except ImportError as exc:
+        raise ImportError("save_materialized_cell requires safetensors>=0.7") from exc
+
+    output_path = Path(path)
+    if output_path.is_symlink():
+        raise ValueError(f"{output_path} is a symlink; refusing materialized-cell output")
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"{output_path} already exists; pass overwrite=True to replace it")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    spec = materialized.spec
+    cell = materialized.cell
+    manifest = {
+        "schema": MATERIALIZED_CELL_SCHEMA,
+        "feature_names": list(materialized.feature_names),
+        "partition": _partition_manifest(spec.partition),
+        "spec": {
+            "trajectory_draw_ordinal": spec.trajectory_draw_ordinal,
+            "noise_draw_ordinal": spec.noise_draw_ordinal,
+            "split_treatment": spec.split_treatment.value,
+            "sigma_scale": spec.sigma_scale.value,
+        },
+        "cell": {
+            "source_name": cell.source_name,
+            "trajectory_seed_base": cell.trajectory_seed_base,
+            "noise_seed_base": cell.noise_seed_base,
+            "trajectory_draw_seed": cell.trajectory_draw_seed,
+            "noise_draw_seed": cell.noise_draw_seed,
+            "trajectory_draw_ordinal": cell.trajectory_draw_ordinal,
+            "noise_draw_ordinal": cell.noise_draw_ordinal,
+            "T": cell.T,
+            "D": cell.D,
+        },
+        "stats_source": "clean_partitions",
+    }
+    tensors = {
+        "clean": materialized.clean,
+        "observed": materialized.observed,
+        "unit_noise": materialized.unit_noise,
+        "split_indices": np.asarray(materialized.split_indices, dtype=np.int64),
+        "sigma": np.asarray([spec.sigma], dtype=np.float32),
+    }
+    tensors.update(_partition_stats_tensors("train", materialized.clean_train_stats))
+    tensors.update(_partition_stats_tensors("val", materialized.clean_val_stats))
+    tensors.update(_partition_stats_tensors("test", materialized.clean_test_stats))
+    manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    save_file(
+        {name: np.ascontiguousarray(value) for name, value in tensors.items()},
+        str(output_path),
+        # One metadata entry is deliberate. safetensors stores metadata in a
+        # hash map, so two redundant keys can swap header order across writes
+        # and give identical tensors different content digests. The canonical
+        # manifest already carries and validates the schema.
+        metadata={"manifest": manifest_json},
+    )
+    return manifest
+
+
+def load_materialized_cell(path: str | Path) -> MaterializedCell:
+    """Load and validate one ``save_materialized_cell`` artifact."""
+
+    try:
+        from safetensors import safe_open
+    except ImportError as exc:
+        raise ImportError("load_materialized_cell requires safetensors>=0.7") from exc
+
+    artifact_path = Path(path)
+    if artifact_path.is_symlink() or not artifact_path.is_file():
+        raise ValueError("materialized cell path must be a regular non-symlink file")
+    with safe_open(artifact_path, framework="np") as artifact:
+        metadata = dict(artifact.metadata() or {})
+        tensors = {name: artifact.get_tensor(name) for name in artifact.keys()}
+    if set(metadata) != {"manifest"}:
+        raise ValueError("materialized cell metadata must contain only its canonical manifest")
+    try:
+        manifest = json.loads(metadata["manifest"])
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise ValueError("materialized cell has no valid canonical manifest") from exc
+    expected_manifest_fields = {"schema", "feature_names", "partition", "spec", "cell", "stats_source"}
+    if not isinstance(manifest, dict) or set(manifest) != expected_manifest_fields:
+        raise ValueError("materialized cell manifest fields differ from the v1 contract")
+    if manifest["schema"] != MATERIALIZED_CELL_SCHEMA or manifest["stats_source"] != "clean_partitions":
+        raise ValueError("materialized cell manifest schema or stats source is invalid")
+    if metadata["manifest"] != json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False):
+        raise ValueError("materialized cell manifest is not canonical JSON")
+
+    base_tensor_names = {"clean", "observed", "unit_noise", "split_indices", "sigma"}
+    stats_tensor_names = {
+        f"{prefix}_{field.removesuffix('_')}"
+        for prefix in ("train", "val", "test")
+        for field in _PARTITION_STATS_ARRAY_FIELDS
+    } | {f"{prefix}_count" for prefix in ("train", "val", "test")}
+    if set(tensors) != base_tensor_names | stats_tensor_names:
+        raise ValueError("materialized cell tensor names differ from the v1 contract")
+    split_indices = tensors["split_indices"]
+    sigma = tensors["sigma"]
+    if split_indices.shape != (6,) or split_indices.dtype != np.int64:
+        raise ValueError("materialized cell split_indices must be int64[6]")
+    if sigma.shape != (1,) or sigma.dtype != np.float32:
+        raise ValueError("materialized cell sigma must be float32[1]")
+
+    partition_fields = {"train_start", "train_end", "val_start", "val_end", "test_start", "test_end"}
+    spec_fields = {"trajectory_draw_ordinal", "noise_draw_ordinal", "split_treatment", "sigma_scale"}
+    cell_fields = {
+        "source_name",
+        "trajectory_seed_base",
+        "noise_seed_base",
+        "trajectory_draw_seed",
+        "noise_draw_seed",
+        "trajectory_draw_ordinal",
+        "noise_draw_ordinal",
+        "T",
+        "D",
+    }
+    if not isinstance(manifest["partition"], dict) or set(manifest["partition"]) != partition_fields:
+        raise ValueError("materialized cell partition fields differ from the v1 contract")
+    if not isinstance(manifest["spec"], dict) or set(manifest["spec"]) != spec_fields:
+        raise ValueError("materialized cell spec fields differ from the v1 contract")
+    if not isinstance(manifest["cell"], dict) or set(manifest["cell"]) != cell_fields:
+        raise ValueError("materialized cell provenance fields differ from the v1 contract")
+    if not isinstance(manifest["feature_names"], list) or not all(
+        isinstance(name, str) for name in manifest["feature_names"]
+    ):
+        raise ValueError("materialized cell feature_names must be a string list")
+
+    partition = PartitionSpec(**manifest["partition"])
+    spec = CellMaterializationSpec(
+        trajectory_draw_ordinal=manifest["spec"]["trajectory_draw_ordinal"],
+        noise_draw_ordinal=manifest["spec"]["noise_draw_ordinal"],
+        sigma=np.float32(sigma[0]),
+        partition=partition,
+        split_treatment=SplitTreatmentScheme(manifest["spec"]["split_treatment"]),
+        sigma_scale=SigmaScale(manifest["spec"]["sigma_scale"]),
+    )
+    cell = TitrationCell(noise_level=float(spec.sigma), **manifest["cell"])
+    return MaterializedCell(
+        spec=spec,
+        cell=cell,
+        clean=tensors["clean"],
+        observed=tensors["observed"],
+        unit_noise=tensors["unit_noise"],
+        split_indices=tuple(int(value) for value in split_indices),
+        clean_train_stats=_partition_stats_from_tensors("train", tensors),
+        clean_val_stats=_partition_stats_from_tensors("val", tensors),
+        clean_test_stats=_partition_stats_from_tensors("test", tensors),
+        feature_names=tuple(manifest["feature_names"]),
+    )

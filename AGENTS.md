@@ -3,7 +3,12 @@
 Use this file to orient coding agents that need to operate the installed
 `serie` command. Keep it short. Human onboarding belongs in `README.md`;
 maintainer and release notes live outside this package repo in
-`../docs/serie_release/developer.md`.
+`../../docs/how-to/serie-release/developer.md`.
+
+The [Python scientific-default rule](../../python/AGENTS.md) applies here too:
+without the owner's explicit approval, do not create or select non-default
+cards, worlds or hidden scientific overrides. An alternate world constructor
+is not a substitute for the named catalog default.
 
 ## What SERIE Does
 
@@ -107,6 +112,24 @@ retired docs may contain them in history; do not recreate those docs.
 Keep changes scoped to the public data layer. Do not move Fern trainer,
 dashboard, run-result, or checkpoint concepts back into SERIE.
 
+## CHG: Direct commands, 2026-09-06
+
+The owner removed `src/serie/Justfile`. Use the installed `serie` CLI directly.
+For a scoped source change, run Ruff and the relevant pytest files from the
+prepared environment; see the current command examples in
+`../../docs/how-to/serie-release/developer.md`. Do not create a package-local
+environment or replace the deleted aliases with another task-runner file.
+
+The existing `.github/workflows/ci.yml` and `publish.yml` invoke checks and
+packaging directly; publication remains a separate authorized action.
+For browser-template changes, `bun run build` in `demo/` builds the viewer;
+copy the reviewed build into `demo_dist/` as part of that separately scoped
+change. Inspect it with the installed `serie demo` CLI.
+
+### Historical instructions below — superseded, not commands to run
+
+The following paragraphs describe the removed file, not current requirements.
+
 Use `just check` before handing work back. It runs Ruff, Pyright, pytest with
 coverage, builds the wheel, installs that wheel in a clean temp venv, and
 smoke-tests the installed CLI. `just publish-release` runs this same check
@@ -122,3 +145,14 @@ instead of debugging frontend code that has not actually failed.
 The maintainer may use Nushell or Fish interactively, but repo commands should
 stay shell-simple. Put repeatable logic in `Justfile`, Python scripts, or CI
 YAML instead of relying on shell-specific tricks.
+
+## Ordered workflows this module implements
+
+[JMLS data preparation](../../docs/how-to/jmls-data-preparation.qmd) owns the
+shared forecast horizons, exact oracle scoring, durable publication and verified
+reuse; [image sequences](../../docs/how-to/image-sequences.qmd) owns the image
+path. Neither trains or chooses experiment configurations. A changed sequence is
+updated in the same patch.
+
+Commits must name the actual model and reasoning effort as required by
+[commit provenance](../../docs/rules/tooling.md#commit-provenance).

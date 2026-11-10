@@ -9,6 +9,7 @@
     "integrators.py",
     "pipeline.py",
     "plots.py",
+    "splitting.py",
     "specs.py"
   ],
   "exclude": [

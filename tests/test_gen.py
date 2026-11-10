@@ -14,9 +14,13 @@ Test matrix:
 
 from __future__ import annotations
 
+from msgspec.structs import replace
+import msgspec
+import json
+
+
 import numpy as np
 import pytest
-from attrs import evolve
 
 from serie.catalog import (
     SYSTEMS,
@@ -33,8 +37,27 @@ from serie.catalog import (
     OUParams,
     DiagonalParams,
 )
-from serie import ShockEvent, ShockSchedule, TrajectorySpec
+from serie import ShockEvent, ShockSchedule, TrajectorySpec, build_dgp_bank, load_data
+from serie.api import dgp_bank_from_tensors, export_dgp_bank_files, export_dgp_bank_safetensors, load_dgp_bank_safetensors
+from serie import (
+    ImpulseCandidate,
+    ImpulseClock,
+    ImpulseClockKind,
+    ImpulseFormulaKind,
+    NamedStateTerm,
+    RealizedImpulse,
+    StateImpulsePlan,
+    StateImpulseRealization,
+    StateImpulseSource,
+    realize_state_impulse_plan,
+)
 from serie.integrators import (
+    ParamChangeEvent,
+    ScalarParameterIncrementEvent,
+    StateCoupledImpulseEvent,
+    StateExpressionOperation,
+    StatePerturbEvent,
+    StateVariableTerm,
     StepShockSchedule,
     _params_as_args,
     _run_map_py,
@@ -231,6 +254,214 @@ class TestPythonMap:
 
 
 class TestPythonShock:
+    def test_random_state_impulse_plan_records_and_replays_timing_and_choice(self, tmp_path):
+        plan = StateImpulsePlan(
+            system=ODESystem.LORENZ,
+            variables=("x", "y", "z"),
+            clock=ImpulseClock(kind=ImpulseClockKind.ONE_PER_BLOCK, first_step=24,
+                               last_step=95, stride=24, probability=1.0),
+            candidates=(
+                ImpulseCandidate(targets=("y", "z"), formula=ImpulseFormulaKind.CONSTANT,
+                                 terms=(), coefficient=0.01, probability=0.5),
+                ImpulseCandidate(targets=("y", "z"), formula=ImpulseFormulaKind.STATE_SUM,
+                                 terms=(NamedStateTerm(variable="y", lag=1, weight=1.0),
+                                        NamedStateTerm(variable="z", lag=2, weight=1.0)),
+                                 coefficient=1e-4, probability=0.5),
+            ),
+        )
+        realization = realize_state_impulse_plan(plan, seed=0)
+        assert realization == realize_state_impulse_plan(plan, seed=0)
+        assert len(realization.events) == 3
+        assert all(start <= event.step < start + 24 for start, event in zip(
+            (24, 48, 72), realization.events, strict=True))
+        assert all(event.candidate_index in (0, 1) for event in realization.events)
+        assert {event.candidate_index for event in realization.events} == {0, 1}
+        saved = msgspec.json.encode(realization)
+        assert msgspec.json.decode(saved, type=StateImpulseRealization) == realization
+
+        source = TrajectorySpec.lorenz(steps=96, burn_in=0)
+        schedule = realization.to_step_schedule(source)
+        first_step = realization.events[0].step
+        baseline = generate_from_trajectory_spec(source, seed=3, dtype=np.float64)
+        changed = generate_from_trajectory_spec(source, seed=3, dtype=np.float64, step_schedule=schedule)
+        np.testing.assert_array_equal(changed[:first_step], baseline[:first_step])
+        assert np.max(np.abs(changed[first_step] - baseline[first_step])) > 0
+        np.testing.assert_array_equal(
+            source.load(seed=3, step_schedule=schedule).series,
+            generate_from_trajectory_spec(source, seed=3, step_schedule=schedule),
+        )
+        named = StateImpulseSource(
+            dataset_id="lorenz.state_impulse.fixture",
+            trajectory_spec=source,
+            realization=realization,
+        )
+        with pytest.raises(ValueError, match="ordinary system dataset identity"):
+            replace(named, dataset_id="lorenz.series")
+        public_data = load_data(named, seed=3)
+        assert public_data.source_id == named.dataset_id
+        assert public_data.feature_names == ("x", "y", "z")
+        assert public_data.metadata["state_impulse_realization"]["events"] == tuple(
+            {"step": event.step, "candidate_index": event.candidate_index}
+            for event in realization.events
+        )
+        np.testing.assert_array_equal(public_data.values, changed.astype(np.float32))
+        bank = build_dgp_bank(named, seed=3, n_noise_draws=1)
+        assert bank.name == named.dataset_id
+        assert bank.feature_names == public_data.feature_names
+        np.testing.assert_array_equal(bank.clean[0], public_data.values)
+        assert json.loads(bank.source_declaration)["realization"]["seed"] == 0
+        manifest = export_dgp_bank_files(bank, tmp_path / "arrays", array_format="npy")
+        assert manifest["source_declaration"]["dataset_id"] == named.dataset_id
+        safetensors_path = tmp_path / "bank.safetensors"
+        export_dgp_bank_safetensors(bank, safetensors_path)
+        restored = dgp_bank_from_tensors(load_dgp_bank_safetensors(safetensors_path))
+        assert restored.source_declaration == bank.source_declaration
+        with pytest.raises(ValueError, match="freezes one realized event schedule"):
+            build_dgp_bank(named, seed=3, n_trajectory_draws=2)
+
+    def test_random_clock_is_independent_of_candidate_choice_stream(self):
+        candidate = ImpulseCandidate(targets=("y",), formula=ImpulseFormulaKind.CONSTANT,
+                                     terms=(), coefficient=0.01, probability=1.0)
+        clock = ImpulseClock(kind=ImpulseClockKind.BERNOULLI, first_step=24,
+                             last_step=72, stride=1, probability=0.5)
+        one = StateImpulsePlan(system=ODESystem.LORENZ, variables=("x", "y", "z"),
+                               clock=clock, candidates=(candidate,))
+        two = replace(one, candidates=(replace(candidate, probability=0.5),
+                                       replace(candidate, targets=("z",), probability=0.5)))
+        one_events = realize_state_impulse_plan(one, seed=17).events
+        two_events = realize_state_impulse_plan(two, seed=17).events
+        assert tuple(event.step for event in one_events) == tuple(event.step for event in two_events)
+        assert all(24 <= event.step <= 72 for event in one_events)
+        assert len(one_events) > 0
+
+    def test_fixed_interval_clock_randomizes_formula_at_exact_steps(self):
+        plan = StateImpulsePlan(
+            system=ODESystem.LORENZ,
+            variables=("x", "y", "z"),
+            clock=ImpulseClock(kind=ImpulseClockKind.FIXED_INTERVAL,
+                               first_step=24, last_step=96, stride=24, probability=1.0),
+            candidates=(
+                ImpulseCandidate(targets=("y", "z"), formula=ImpulseFormulaKind.CONSTANT,
+                                 terms=(), coefficient=0.01, probability=0.5),
+                ImpulseCandidate(targets=("y", "z"), formula=ImpulseFormulaKind.STATE_SUM,
+                                 terms=(NamedStateTerm(variable="y", lag=0, weight=1.0),
+                                        NamedStateTerm(variable="z", lag=0, weight=1.0)),
+                                 coefficient=1e-4, probability=0.5),
+            ),
+        )
+        events = realize_state_impulse_plan(plan, seed=0).events
+        assert tuple(event.step for event in events) == (24, 48, 72, 96)
+        assert {event.candidate_index for event in events} == {0, 1}
+
+    def test_state_impulse_plan_refuses_undeclared_formula_and_invalid_replay(self):
+        clock = ImpulseClock(kind=ImpulseClockKind.FIXED_INTERVAL, first_step=24,
+                             last_step=48, stride=24, probability=1.0)
+        candidate = ImpulseCandidate(targets=("y", "z"), formula=ImpulseFormulaKind.STATE_PRODUCT,
+                                     terms=(NamedStateTerm(variable="y", lag=0, weight=1.0),
+                                            NamedStateTerm(variable="z", lag=0, weight=1.0)),
+                                     coefficient=1e-4, probability=1.0)
+        plan = StateImpulsePlan(system=ODESystem.LORENZ, variables=("x", "y", "z"),
+                                clock=clock, candidates=(candidate,))
+        with pytest.raises(ValueError, match="formula"):
+            replace(candidate, formula="power")
+        with pytest.raises(ValueError, match="declared state variables"):
+            replace(plan, candidates=(replace(candidate, targets=("w",)),))
+        with pytest.raises(ValueError, match="every eligible"):
+            StateImpulseRealization(plan=plan, seed=0,
+                                    events=(RealizedImpulse(step=24, candidate_index=0),))
+        with pytest.raises(ValueError, match="source system disagree"):
+            realize_state_impulse_plan(plan, seed=0).to_step_schedule(TrajectorySpec.rossler(steps=48))
+
+    def test_exact_step_state_and_parameter_changes_use_native_steps(self):
+        base = TrajectorySpec.lorenz(steps=72, burn_in=0)
+        schedule = StepShockSchedule(
+            events=(
+                StatePerturbEvent(step=24, state_idx=1, eps=0.01),
+                StatePerturbEvent(step=24, state_idx=2, eps=0.01),
+                ScalarParameterIncrementEvent(step=48, parameter_name="rho", delta=0.01),
+            ),
+            param_sets=(base.params,),
+        )
+        factual = generate_from_trajectory_spec(base, seed=0, dtype=np.float64)
+        changed = generate_from_trajectory_spec(base, seed=0, dtype=np.float64, step_schedule=schedule)
+
+        np.testing.assert_array_equal(changed[:24], factual[:24])
+        pre_step = factual[23].copy()
+        pre_step[1:] += 0.01
+        np.testing.assert_allclose(changed[24], _rk4_step(SYSTEMS["lorenz"].f_py, pre_step, base.dt, base.params), rtol=0, atol=1e-13)
+        after = replace(base.params, rho=base.params.rho + 0.01)
+        np.testing.assert_allclose(changed[48], _rk4_step(SYSTEMS["lorenz"].f_py, changed[47], base.dt, after), rtol=0, atol=1e-13)
+
+    def test_exact_step_delayed_perturbation_reads_the_declared_past(self):
+        base = TrajectorySpec.lorenz(steps=72, burn_in=0)
+        delayed = StateCoupledImpulseEvent(
+            step=24,
+            targets=(1, 2),
+            terms=(StateVariableTerm(state_idx=1, lag=1, weight=1.0),
+                   StateVariableTerm(state_idx=2, lag=2, weight=1.0)),
+            operation=StateExpressionOperation.SUM,
+            coefficient=1e-4,
+        )
+        schedule = StepShockSchedule(events=(delayed, replace(delayed, step=48)), param_sets=(base.params,))
+        factual = generate_from_trajectory_spec(base, seed=0, dtype=np.float64)
+        changed = generate_from_trajectory_spec(base, seed=0, dtype=np.float64, step_schedule=schedule)
+
+        np.testing.assert_array_equal(changed[:24], factual[:24])
+        for step in (24, 48):
+            amount = 1e-4 * (changed[step - 2, 1] + changed[step - 3, 2])
+            pre_step = changed[step - 1].copy()
+            pre_step[1:] += amount
+            np.testing.assert_allclose(
+                changed[step], _rk4_step(SYSTEMS["lorenz"].f_py, pre_step, base.dt, base.params),
+                rtol=0, atol=1e-13,
+            )
+
+    def test_exact_step_state_product_reads_current_pre_step_state(self):
+        base = TrajectorySpec.lorenz(steps=24, burn_in=0)
+        event = StateCoupledImpulseEvent(
+            step=24, targets=(1, 2),
+            terms=(StateVariableTerm(state_idx=1, lag=0, weight=1.0),
+                   StateVariableTerm(state_idx=2, lag=0, weight=1.0)),
+            operation=StateExpressionOperation.PRODUCT, coefficient=1e-4,
+        )
+        schedule = StepShockSchedule(events=(event,), param_sets=(base.params,))
+        factual = generate_from_trajectory_spec(base, dtype=np.float64)
+        changed = generate_from_trajectory_spec(base, dtype=np.float64, step_schedule=schedule)
+
+        np.testing.assert_array_equal(changed[:24], factual[:24])
+        pre_step = factual[23].copy()
+        pre_step[1:] += 1e-4 * factual[23, 1] * factual[23, 2]
+        np.testing.assert_allclose(changed[24], _rk4_step(SYSTEMS["lorenz"].f_py, pre_step, base.dt, base.params), rtol=0, atol=1e-13)
+
+    def test_exact_step_schedule_refuses_missing_history_and_mixed_clocks(self):
+        base = TrajectorySpec.lorenz(steps=72, burn_in=0)
+        delayed = StateCoupledImpulseEvent(
+            step=2, targets=(1, 2),
+            terms=(StateVariableTerm(state_idx=1, lag=1, weight=1.0),
+                   StateVariableTerm(state_idx=2, lag=2, weight=1.0)),
+            operation=StateExpressionOperation.SUM,
+            coefficient=1e-4,
+        )
+        schedule = StepShockSchedule(events=(delayed,), param_sets=(base.params,))
+        with pytest.raises(ValueError, match="preceding state history"):
+            generate_from_trajectory_spec(base, step_schedule=schedule)
+        fraction_timed = replace(base, shocks=ShockSchedule.single(
+            ShockEvent.state_perturbation(state_idx=1, eps=0.01, t_start=0.5)))
+        with pytest.raises(ValueError, match="cannot share one trajectory"):
+            generate_from_trajectory_spec(fraction_timed, step_schedule=schedule)
+
+    def test_exact_step_events_reach_the_existing_serie_bundle(self):
+        base = TrajectorySpec.lorenz(steps=48, burn_in=0)
+        schedule = StepShockSchedule(
+            events=(StatePerturbEvent(step=24, state_idx=1, eps=0.01),),
+            param_sets=(base.params,),
+        )
+        bundle = base.load(seed=3, step_schedule=schedule)
+        expected = generate_from_trajectory_spec(base, seed=3, step_schedule=schedule)
+
+        np.testing.assert_array_equal(bundle.series, expected)
+        assert bundle.params.step_schedule is schedule
+
     def test_lorenz_param_shock_differs(self):
         x0 = np.array([1.0, 0.98, 1.1])
         params = LorenzParams(sigma=10.0, rho=28.0, beta=8.0 / 3.0)
@@ -260,7 +491,7 @@ class TestPythonShock:
 
     def test_public_multi_state_schedule_applies_both_perturbations(self):
         base = TrajectorySpec.lorenz(steps=500, burn_in=0)
-        source = evolve(
+        source = replace(
             base,
             shocks=ShockSchedule.multiple(
                 ShockEvent.state_perturbation(state_idx=0, eps=0.5, t_start=0.2),
@@ -295,9 +526,9 @@ class TestPythonShock:
             after,
         )
 
-    def test_public_params_stepped_transition_changes_dynamics_gradually(self):
+    def test_public_stepped_transition_preserves_prefix_and_changes_final_value(self):
         base = TrajectorySpec.diagonal(eigenvalues=(0.0,), steps=20, dt=0.05, burn_in=0)
-        transitioned = evolve(
+        transitioned = replace(
             base,
             shocks=ShockSchedule.single(
                 ShockEvent.params_stepped_transition(
@@ -331,8 +562,11 @@ class TestPresets:
             lorenz96_spec,
             ou_spec,
             doublewell_spec,
+            doublewell_barrier_collapse_spec,
             lg_ssm_spec,
             lg_ssm_small_spec,
+            lg_ssm_switch_spec,
+            lg_ssm_regime_switch_spec,
             slds_spec,
             seasonal_ar_spec,
             garch_spec,
@@ -347,8 +581,11 @@ class TestPresets:
             lorenz96_spec,
             ou_spec,
             doublewell_spec,
+            doublewell_barrier_collapse_spec,
             lg_ssm_spec,
             lg_ssm_small_spec,
+            lg_ssm_switch_spec,
+            lg_ssm_regime_switch_spec,
             slds_spec,
             seasonal_ar_spec,
             garch_spec,
@@ -369,8 +606,11 @@ class TestPresets:
             chua_param_shock_spec,
             chua_switch_spec,
             ou_param_shock_spec,
+            doublewell_barrier_collapse_spec,
             doublewell_param_shock_spec,
             doublewell_switch_spec,
+            lg_ssm_switch_spec,
+            lg_ssm_regime_switch_spec,
             slds_param_shock_spec,
             slds_switch_spec,
             seasonal_ar_param_shock_spec,
@@ -386,8 +626,11 @@ class TestPresets:
             chua_param_shock_spec,
             chua_switch_spec,
             ou_param_shock_spec,
+            doublewell_barrier_collapse_spec,
             doublewell_param_shock_spec,
             doublewell_switch_spec,
+            lg_ssm_switch_spec,
+            lg_ssm_regime_switch_spec,
             slds_param_shock_spec,
             slds_switch_spec,
             seasonal_ar_param_shock_spec,
@@ -398,6 +641,15 @@ class TestPresets:
             spec = fn()
             assert spec.shocks is not None
             assert not spec.shocks.is_stationary
+
+    def test_doublewell_barrier_collapse_changes_only_the_barrier_parameter(self):
+        from serie.catalog import DoubleWellParams, doublewell_barrier_collapse_spec
+
+        spec = doublewell_barrier_collapse_spec()
+        assert spec.params == DoubleWellParams(a=1.5, sigma_noise=0.25)
+        event = spec.shocks.events[0]
+        assert event.t_start == 0.35
+        assert event.params_after == DoubleWellParams(a=0.5, sigma_noise=0.25)
 
     def test_trajectory_spec_forwarding_matches_catalog(self):
         """TrajectorySpec.lorenz() should produce the same result as lorenz_spec()."""
@@ -410,6 +662,81 @@ class TestPresets:
         assert a.dt == b.dt
         assert a.steps == b.steps
         assert a.dim == b.dim
+
+    def test_named_initial_condition_sources_are_closed_and_pinned(self):
+        from serie.catalog import ODESystem, list_sources, source_preset
+
+        holdout = [source_preset(f"rossler_ic_holdout_{ordinal}")() for ordinal in range(8)]
+        assert holdout[0].x0 == (0.99, 0.99, 0.99)
+        assert holdout[7].x0 == (1.01, 1.01, 1.01)
+        for axis in range(3):
+            assert sum(spec.x0[axis] == 0.99 for spec in holdout) == 4
+            assert sum(spec.x0[axis] == 1.01 for spec in holdout) == 4
+
+        rossler_random = [source_preset(f"rossler_ic_random_{ordinal}")() for ordinal in range(16)]
+        assert rossler_random[0].x0 == (
+            0.9913589285360874,
+            0.9964693520999365,
+            0.9969714152588378,
+        )
+        assert rossler_random[15].x0 == (
+            1.0037225046260485,
+            0.9921321284829052,
+            1.0048187731345346,
+        )
+        assert len({spec.x0 for spec in rossler_random}) == 16
+        assert all(spec.system is ODESystem.ROSSLER for spec in holdout + rossler_random)
+        assert all(abs(value - 1.0) <= 0.01 for spec in rossler_random for value in spec.x0)
+
+        lorenz_random = [source_preset(f"lorenz_ic_{ordinal}")() for ordinal in range(16)]
+        assert lorenz_random[0].x0 == (
+            0.42436157047691725,
+            0.13387029225556435,
+            1.8456599328215408,
+        )
+        assert lorenz_random[15].x0 == (
+            0.07975996295866583,
+            1.3642066367795043,
+            1.7588223539298788,
+        )
+        assert len({spec.x0 for spec in lorenz_random}) == 16
+        assert all(spec.system is ODESystem.LORENZ for spec in lorenz_random)
+        lorenz_base = (1.0, 0.98, 1.1)
+        assert all(
+            abs(value - lorenz_base[axis]) <= 1.0
+            for spec in lorenz_random
+            for axis, value in enumerate(spec.x0)
+        )
+
+        names = set(list_sources())
+        assert all(f"rossler_ic_holdout_{ordinal}" in names for ordinal in range(8))
+        assert all(f"rossler_ic_random_{ordinal}" in names for ordinal in range(16))
+        assert all(f"lorenz_ic_{ordinal}" in names for ordinal in range(16))
+        for unsupported in [
+            "rossler_ic_holdout_8",
+            "rossler_ic_random_16",
+            "lorenz_ic_16",
+            "controlled_pendulum",
+            "controlled_lgssm_controlled_lgssm",
+            "radial_attenuation_gamma4",
+            "radial_attenuation_gaussian",
+        ]:
+            with pytest.raises(ValueError, match="Unknown system name"):
+                source_preset(unsupported)
+
+    def test_named_initial_condition_bank_preserves_the_requested_source_identity(self):
+        from serie.api import build_dgp_bank
+
+        bank = build_dgp_bank(
+            "rossler_ic_holdout_0",
+            seed=42,
+            n_trajectory_draws=1,
+            n_noise_draws=1,
+            noise_seed_base=11_000,
+        )
+
+        assert bank.name == "rossler_ic_holdout_0"
+        assert tuple(float(value) for value in bank.clean[0, 0]) == pytest.approx((0.99, 0.99, 0.99))
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -491,7 +818,7 @@ class TestGenerateFromTrajectorySpec:
         # overrides steps, so it must override burn_in too.
         nx = 32
         x = np.arange(nx, dtype=np.float64)
-        spec = evolve(
+        spec = replace(
             ks_spec(nx=nx, steps=200, dt=1e-2, burn_in=0),
             x0=tuple(0.1 * np.cos(2.0 * np.pi * x / nx)),
         )
@@ -549,7 +876,7 @@ class TestGenerateFromTrajectorySpec:
         assert np.random.default_rng(seed).random() < 0.5, "premise: initial regime must be 1"
 
         spec = slds_spec(A1=0.9, Q1=0.0, A2=0.0, Q2=0.0, p11=0.0, p22=1.0, steps=3)
-        spec = evolve(spec, x0=(1.0,))
+        spec = replace(spec, x0=(1.0,))
         traj = generate_from_trajectory_spec(spec, seed=seed, dtype=np.float64)[:, 0]
 
         assert traj[0] == 1.0
@@ -563,7 +890,7 @@ class TestGenerateFromTrajectorySpec:
         # A stepped transition whose window collapses to 1 step gap cannot
         # honor n_inserts=5. This must raise (not silently clamp): steps=100,
         # t_start=0.5, t_end=0.5001 → window steps 50..51 → 1 gap < 5.
-        spec = evolve(
+        spec = replace(
             lorenz_spec(steps=100),
             shocks=ShockSchedule.single(
                 ShockEvent.params_stepped_transition(
@@ -576,6 +903,349 @@ class TestGenerateFromTrajectorySpec:
         )
         with pytest.raises(ValueError, match="asks for 5 scheduled updates"):
             generate_from_trajectory_spec(spec, seed=0)
+
+    def test_stage_synthetic_lorenz_rk4_golden_rows(self):
+        """Pin the shared f64 RK4 Lorenz trajectory before dtype conversion."""
+        trajectory = generate_from_trajectory_spec(
+            TrajectorySpec.lorenz(steps=8), seed=0, dtype=np.float64
+        )
+        expected = np.array(
+            [
+                [1.0, 0.98, 1.1],
+                [1.0106171380832871, 1.2388683281370947, 1.0820453023442074],
+                [1.0449852330283642, 1.501400454999214, 1.0674511464470786],
+                [1.1014901367567624, 1.7736620877262035, 1.0566852170181364],
+                [1.1792277940744504, 2.0613208903755176, 1.050435417714531],
+                [1.2779072863287948, 2.3698172509608684, 1.0496302483769067],
+                [1.3977780190154419, 2.7045083613021608, 1.0554776691236423],
+                [1.539576445052988, 3.070790073021694, 1.0695221920723448],
+                [1.7044885000029064, 3.4741993644492126, 1.0937215315961872],
+            ],
+            dtype=np.float64,
+        )
+        np.testing.assert_allclose(trajectory, expected, rtol=0.0, atol=2e-15)
+
+    def test_stage_synthetic_transition_uses_elapsed_step_progress(self):
+        """A rounded 7/10 schedule uses elapsed 2/5 then full progress."""
+        before = LorenzParams(sigma=10.0, rho=28.0, beta=8.0 / 3.0)
+        after = LorenzParams(sigma=10.0, rho=35.0, beta=8.0 / 3.0)
+        schedule = StepShockSchedule.param_transition(
+            before, after, start_step=5, end_step=10, n_inserts=2
+        )
+        assert [(event.step, event.param_set_idx) for event in schedule.events] == [
+            (7, 1),
+            (10, 2),
+        ]
+        assert isinstance(schedule.param_sets[1], LorenzParams)
+        # Rust currently advances by update ordinal and incorrectly gives 31.5
+        # here. A transition names elapsed time, so its parameters must follow
+        # the actual rounded event time: (7 - 5) / (10 - 5) = 2/5.
+        assert schedule.param_sets[1].rho == pytest.approx(30.8, abs=1e-12)
+        assert 28.0 < schedule.param_sets[1].rho < after.rho
+        assert schedule.param_sets[2] == after
+
+    def test_stage_synthetic_one_update_transition_is_abrupt(self):
+        """A step-change starts at floor(0.25 * 20) = 5, never at its end time."""
+        base = TrajectorySpec.lorenz(steps=20)
+        shocked = replace(
+            base,
+            shocks=ShockSchedule.single(
+                ShockEvent.params_step_change(
+                    params_after=LorenzParams(
+                        sigma=10.0, rho=35.0, beta=8.0 / 3.0
+                    ),
+                    t_start=0.25,
+                )
+            ),
+        )
+        nominal = generate_from_trajectory_spec(base, seed=0, dtype=np.float64)
+        changed = generate_from_trajectory_spec(shocked, seed=0, dtype=np.float64)
+        np.testing.assert_array_equal(changed[:5], nominal[:5])
+        assert not np.array_equal(changed[5], nominal[5])
+
+    @pytest.mark.parametrize("burn_in", [10, 11], ids=["equal", "greater"])
+    def test_stage_synthetic_rejects_burn_in_at_or_beyond_steps(self, burn_in: int):
+        spec = replace(TrajectorySpec.lorenz(steps=10), burn_in=burn_in)
+        with pytest.raises(
+            ValueError, match=rf"burn_in \({burn_in}\) must be < steps \(10\)"
+        ):
+            generate_from_trajectory_spec(spec, seed=0)
+
+    def test_stage_synthetic_slds_burn_in_shape(self):
+        from serie.catalog import slds_spec
+
+        spec = replace(slds_spec(steps=10), burn_in=3)
+        trajectory = generate_from_trajectory_spec(spec, seed=0, dtype=np.float64)
+        assert trajectory.shape == (8, 1)
+        assert np.isfinite(trajectory).all()
+
+    def test_stage_synthetic_garch_initial_state_golden(self):
+        from serie.catalog import garch_spec
+
+        spec = garch_spec(steps=10)
+        trajectory = generate_from_trajectory_spec(spec, seed=0, dtype=np.float64)
+        expected_variance = spec.params.omega / (
+            1.0 - spec.params.alpha - spec.params.beta
+        )
+        np.testing.assert_allclose(
+            trajectory[0], [0.0, expected_variance], rtol=0.0, atol=1e-15
+        )
+        assert trajectory.shape == (11, 2)
+
+    def test_stage_synthetic_discrete_seed_contracts(self):
+        from serie.catalog import (
+            garch_spec,
+            lg_ssm_small_spec,
+            seasonal_ar_spec,
+            slds_spec,
+        )
+
+        for spec in (
+            slds_spec(steps=40),
+            seasonal_ar_spec(steps=40),
+            garch_spec(steps=40),
+            lg_ssm_small_spec(steps=40),
+        ):
+            first = generate_from_trajectory_spec(spec, seed=7, dtype=np.float64)
+            same_seed = generate_from_trajectory_spec(spec, seed=7, dtype=np.float64)
+            other_seed = generate_from_trajectory_spec(spec, seed=8, dtype=np.float64)
+            np.testing.assert_array_equal(first, same_seed)
+            assert not np.array_equal(first, other_seed)
+
+    def test_stage_synthetic_discrete_param_shock_presets_generate(self):
+        from serie.catalog import (
+            garch_param_shock_spec,
+            seasonal_ar_param_shock_spec,
+            slds_param_shock_spec,
+        )
+
+        for spec in (
+            replace(slds_param_shock_spec(), steps=40),
+            replace(seasonal_ar_param_shock_spec(), steps=40),
+            replace(garch_param_shock_spec(), steps=40),
+        ):
+            trajectory = generate_from_trajectory_spec(spec, seed=0, dtype=np.float64)
+            assert trajectory.shape == (41, spec.dim)
+            assert np.isfinite(trajectory).all()
+
+    @pytest.mark.parametrize(
+        "switch_spec_factory",
+        [
+            pytest.param("slds", id="slds"),
+            pytest.param("doublewell", id="doublewell"),
+        ],
+    )
+    def test_stage_synthetic_stochastic_switch_splices_seed_plus_one(
+        self, switch_spec_factory: str
+    ):
+        from serie.catalog import doublewell_switch_spec, slds_switch_spec
+
+        factory = {
+            "slds": slds_switch_spec,
+            "doublewell": doublewell_switch_spec,
+        }[switch_spec_factory]
+        switched_spec = replace(factory(), steps=20)
+        event = switched_spec.shocks.events[0]
+        assert event.ic_b is not None
+        assert event.params_after is not None
+        splice_step = int(event.t_start * switched_spec.steps)
+        before = replace(switched_spec, shocks=ShockSchedule.none())
+        after = replace(
+            before,
+            params=event.params_after,
+            x0=event.ic_b,
+            shocks=ShockSchedule.none(),
+        )
+        switched = generate_from_trajectory_spec(
+            switched_spec, seed=5, dtype=np.float64
+        )
+        trajectory_a = generate_from_trajectory_spec(before, seed=5, dtype=np.float64)
+        trajectory_b = generate_from_trajectory_spec(after, seed=6, dtype=np.float64)
+        np.testing.assert_array_equal(
+            switched[: splice_step + 1], trajectory_a[: splice_step + 1]
+        )
+        np.testing.assert_array_equal(
+            switched[splice_step + 1 :], trajectory_b[splice_step + 1 :]
+        )
+
+    def test_stage_synthetic_ou_seed_changes_trajectory(self):
+        first = generate_from_trajectory_spec(
+            TrajectorySpec.ou(steps=100), seed=7, dtype=np.float64
+        )
+        other = generate_from_trajectory_spec(
+            TrajectorySpec.ou(steps=100), seed=8, dtype=np.float64
+        )
+        assert not np.array_equal(first, other)
+
+    def test_stage_generate_ode_switch_splices_prefix_onto_b(self):
+        """A deterministic switch is A through its cut row, then B's suffix."""
+        from serie.catalog import lorenz_switch_spec
+
+        switched_spec = replace(lorenz_switch_spec(), steps=20)
+        event = switched_spec.shocks.events[0]
+        assert event.ic_b is not None
+        assert event.params_after is not None
+        splice_step = int(event.t_start * switched_spec.steps)
+        before = replace(switched_spec, shocks=ShockSchedule.none())
+        after = replace(
+            before,
+            params=event.params_after,
+            x0=event.ic_b,
+            shocks=ShockSchedule.none(),
+        )
+        switched = generate_from_trajectory_spec(switched_spec, seed=5, dtype=np.float64)
+        trajectory_a = generate_from_trajectory_spec(before, seed=5, dtype=np.float64)
+        trajectory_b = generate_from_trajectory_spec(after, seed=6, dtype=np.float64)
+        np.testing.assert_array_equal(
+            switched[: splice_step + 1], trajectory_a[: splice_step + 1]
+        )
+        np.testing.assert_array_equal(
+            switched[splice_step + 1 :], trajectory_b[splice_step + 1 :]
+        )
+
+    def test_stage_generate_param_set_index_selects_declared_regime(self):
+        """An event selects its declared parameter-set index, not its ordinal."""
+        before = LorenzParams(sigma=10.0, rho=28.0, beta=8.0 / 3.0)
+        skipped = LorenzParams(sigma=10.0, rho=29.0, beta=8.0 / 3.0)
+        selected = LorenzParams(sigma=10.0, rho=35.0, beta=8.0 / 3.0)
+        schedule = StepShockSchedule(
+            events=(ParamChangeEvent(step=1, param_set_idx=2),),
+            param_sets=(before, skipped, selected),
+        )
+        indexed = _np_ode(
+            "lorenz", np.array([1.0, 0.98, 1.1]), 3, 0.01, before, schedule
+        )
+        direct = _np_ode(
+            "lorenz", np.array([1.0, 0.98, 1.1]), 3, 0.01, selected
+        )
+        np.testing.assert_array_equal(indexed, direct)
+
+    def test_stage_generate_ou_zero_noise_matches_euler_formula(self):
+        """With sigma=0, OU is its stated Euler recurrence, independent of seed."""
+        from serie.catalog import ou_spec
+
+        spec = ou_spec(theta=0.5, mu=2.0, sigma_noise=0.0, dt=0.25, steps=2)
+        trajectory = generate_from_trajectory_spec(spec, seed=17, dtype=np.float64)
+        np.testing.assert_allclose(trajectory[:, 0], [0.0, 0.25, 0.46875], atol=1e-15)
+
+    def test_stage_generate_doublewell_zero_noise_matches_euler_formula(self):
+        """Zero-noise double-well follows x += (-x^3 + a*x) dt toward +sqrt(a)."""
+        from serie.catalog import doublewell_spec
+
+        spec = replace(
+            doublewell_spec(a=1.5, sigma_noise=0.0, dt=0.1, steps=2), x0=(0.2,)
+        )
+        trajectory = generate_from_trajectory_spec(spec, seed=17, dtype=np.float64)
+        first = 0.2 + (-0.2**3 + 1.5 * 0.2) * 0.1
+        second = first + (-first**3 + 1.5 * first) * 0.1
+        np.testing.assert_allclose(trajectory[:, 0], [0.2, first, second], atol=1e-15)
+        assert trajectory[-1, 0] > trajectory[0, 0]
+
+    def test_stage_generate_ou_parameter_and_state_shocks_land_on_event_row(self):
+        """Events apply before their Euler step, so both alter that output row."""
+        from serie.catalog import OUParams, ou_spec
+
+        before = OUParams(theta=0.5, mu=0.0, sigma_noise=0.0)
+        after = OUParams(theta=0.5, mu=4.0, sigma_noise=0.0)
+        spec = replace(
+            ou_spec(theta=before.theta, mu=before.mu, sigma_noise=0.0, dt=1.0, steps=2),
+            shocks=ShockSchedule.multiple(
+                ShockEvent.params_step_change(after, t_start=0.5),
+                ShockEvent.state_perturbation(state_idx=0, eps=3.0, t_start=1.0),
+            ),
+        )
+        trajectory = generate_from_trajectory_spec(spec, seed=0, dtype=np.float64)
+        np.testing.assert_allclose(trajectory[:, 0], [0.0, 2.0, 4.5], atol=1e-15)
+
+    def test_stage_generate_slds_param_shock_lands_on_event_row(self):
+        """A zero-noise SLDS parameter replacement changes the declared row itself."""
+        from serie.catalog import SLDSParams, slds_spec
+
+        before = SLDSParams(A1=1.0, A2=1.0, Q1=0.0, Q2=0.0, p11=1.0, p22=1.0)
+        after = SLDSParams(A1=2.0, A2=2.0, Q1=0.0, Q2=0.0, p11=1.0, p22=1.0)
+        spec = replace(
+            slds_spec(steps=3),
+            params=before,
+            x0=(1.0,),
+            shocks=ShockSchedule.single(ShockEvent.params_step_change(after, t_start=2 / 3)),
+        )
+        trajectory = generate_from_trajectory_spec(spec, seed=0, dtype=np.float64)
+        np.testing.assert_allclose(trajectory[:, 0], [1.0, 1.0, 2.0, 4.0], atol=1e-15)
+
+    def test_stage_generate_seasonal_ar_periodicity_and_state_kick(self):
+        """The recurrence is periodic without noise, and a state kick is pre-step."""
+        from serie.catalog import seasonal_ar_spec
+
+        periodic = generate_from_trajectory_spec(
+            seasonal_ar_spec(S=4, phi=0.0, sigma=0.0, a0=1.0, steps=4),
+            seed=0,
+            dtype=np.float64,
+        )
+        np.testing.assert_allclose(periodic[:, 0], [0.0, 1.0, 0.0, -1.0, 0.0], atol=1e-15)
+
+        kicked_spec = replace(
+            seasonal_ar_spec(S=4, phi=1.0, sigma=0.0, a0=0.0, steps=4),
+            shocks=ShockSchedule.single(
+                ShockEvent.state_perturbation(state_idx=0, eps=3.0, t_start=0.5)
+            ),
+        )
+        kicked = generate_from_trajectory_spec(kicked_spec, seed=0, dtype=np.float64)
+        np.testing.assert_allclose(kicked[:, 0], [0.0, 0.0, 3.0, 3.0, 3.0], atol=1e-15)
+
+    def test_stage_generate_garch_param_and_state_shocks_land_on_event_row(self):
+        """GARCH updates parameters and its stored prior return before recurrence."""
+        from serie.catalog import GARCHParams, garch_spec
+
+        after = GARCHParams(omega=0.1, alpha=0.5, beta=0.0)
+        base = replace(
+            garch_spec(steps=4),
+            shocks=ShockSchedule.single(ShockEvent.params_step_change(after, t_start=0.5)),
+        )
+        kicked_spec = replace(
+            garch_spec(steps=4),
+            shocks=ShockSchedule.multiple(
+                ShockEvent.params_step_change(after, t_start=0.5),
+                ShockEvent.state_perturbation(state_idx=0, eps=2.0, t_start=0.75),
+            ),
+        )
+        nominal = generate_from_trajectory_spec(base, seed=4, dtype=np.float64)
+        kicked = generate_from_trajectory_spec(kicked_spec, seed=4, dtype=np.float64)
+        shock_step = 2
+        assert kicked[shock_step, 0] == pytest.approx(nominal[shock_step, 0] + 2.0)
+        assert kicked[3, 1] == pytest.approx(0.1 + 0.5 * kicked[2, 0] ** 2)
+
+    def test_stage_generate_garch_unconditional_variance(self):
+        """A stationary GARCH return's long-run second moment targets omega/(1-a-b)."""
+        from serie.catalog import garch_spec
+
+        spec = garch_spec(omega=0.01, alpha=0.06, beta=0.90, steps=30_000)
+        trajectory = generate_from_trajectory_spec(spec, seed=17, dtype=np.float64)
+        expected = spec.params.omega / (1.0 - spec.params.alpha - spec.params.beta)
+        observed = float(np.mean(trajectory[5_000:, 0] ** 2))
+        assert observed == pytest.approx(expected, rel=0.15)
+
+    def test_stage_generate_lg_ssm_param_shock_rejects_block_count_change(self):
+        """State dimension is structural: a parameter event cannot add/remove blocks."""
+        from serie.catalog import LGSSMParams, lg_ssm_small_spec
+
+        spec = lg_ssm_small_spec(steps=4)
+        p = spec.params
+        invalid = LGSSMParams(
+            gammas=p.gammas[:1], omegas=p.omegas[:1], kappa_v=p.kappa_v, q_c=p.q_c
+        )
+        shocked = replace(
+            spec,
+            shocks=ShockSchedule.single(
+                ShockEvent.params_step_change(invalid, t_start=0.5)
+            ),
+        )
+        with pytest.raises(ValueError, match="must keep the block count"):
+            generate_from_trajectory_spec(shocked, seed=0, dtype=np.float64)
+
+    def test_stage_generate_switch_rejects_step_beyond_trajectory(self):
+        """The public fractional switch boundary rejects a cut beyond the final row."""
+        with pytest.raises(ValueError):
+            ShockEvent.trajectory_switch(ic_b=(1.0, 1.0, 1.0), t_start=1.1)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -606,6 +1276,20 @@ class TestLGSSM:
         assert traj.shape == (1001, 8)
         assert np.all(np.isfinite(traj))
         assert float(traj.std()) > 0.1
+
+    def test_lg_ssm_regime_switch_changes_frequency_memory_and_geometry(self):
+        """The strong world is multi-axis but stays exactly linear-Gaussian."""
+        from serie.catalog import LGSSMParams, lg_ssm_regime_switch_spec
+
+        spec = lg_ssm_regime_switch_spec(steps=20)
+        before = spec.params
+        after = spec.shocks.events[0].params_after
+        assert isinstance(before, LGSSMParams)
+        assert isinstance(after, LGSSMParams)
+        assert after.omegas == pytest.approx(tuple(1.5 * omega for omega in before.omegas))
+        assert np.exp(-after.gammas[0] * spec.dt) == pytest.approx(0.90)
+        assert after.kappa_v == pytest.approx(5.0)
+        assert after.q_c == pytest.approx(2.0 * after.gammas[0])
 
     def test_lg_ssm_spectral_radius_fixed_across_kappa(self):
         # The controlled non-normality design (§3.5): |eig(A)| = exp(-γ·dt)
@@ -778,7 +1462,7 @@ class TestLGSSM:
             kappa_v=p.kappa_v,
             q_c=p.q_c,
         )
-        shocked_spec = evolve(
+        shocked_spec = replace(
             spec,
             shocks=ShockSchedule.single(
                 ShockEvent.params_step_change(params_after=params_after, t_start=0.5)
@@ -809,3 +1493,83 @@ class TestLGSSM:
         assert halfway.q_c == pytest.approx(0.3)
         landed = schedule.param_sets[2]
         assert landed == after
+
+    @pytest.mark.parametrize(("context_steps", "horizon"), [(6, 4), (12, 3)])
+    def test_lg_ssm_switch_truth_matches_conditional_monte_carlo(self, context_steps, horizon):
+        """The analytic predictor matches forward simulation across/after the switch."""
+        from serie.catalog import (
+            LGSSMParams,
+            lg_ssm_discretize_exact,
+            lg_ssm_switch_spec,
+            lgssm_switch_truth,
+        )
+
+        switch_step = 8
+        spec = lg_ssm_switch_spec(
+            periods=(12.0, 24.0),
+            switch_fraction=switch_step / 20,
+            steps=20,
+        )
+        params_before = spec.params
+        params_after = spec.shocks.events[0].params_after
+        assert isinstance(params_before, LGSSMParams)
+        assert isinstance(params_after, LGSSMParams)
+
+        clean = generate_from_trajectory_spec(spec, seed=17, dtype=np.float64)
+        observation_std = 0.2
+        observation_covariance = observation_std**2 * np.eye(spec.dim)
+        observation_rng = np.random.default_rng(23)
+        observations = clean + observation_std * observation_rng.standard_normal(clean.shape)
+        law = lgssm_switch_truth(
+            observations[:context_steps],
+            params_before=params_before,
+            params_after=params_after,
+            dt=spec.dt,
+            switch_step=switch_step,
+            horizon=horizon,
+            observation_covariance_dd=observation_covariance,
+        )
+
+        before_transition, before_process_covariance = lg_ssm_discretize_exact(params_before, spec.dt)
+        after_transition, after_process_covariance = lg_ssm_discretize_exact(params_after, spec.dt)
+        monte_carlo_rng = np.random.default_rng(29 + context_steps)
+        draws = 30_000
+        latent = monte_carlo_rng.multivariate_normal(
+            law.filtered_mean_d,
+            law.filtered_covariance_dd,
+            size=draws,
+        )
+        future_observations = []
+        last_context_step = context_steps - 1
+        for horizon_idx in range(horizon):
+            destination_step = last_context_step + horizon_idx + 1
+            if destination_step < switch_step:
+                transition = before_transition
+                process_covariance = before_process_covariance
+            else:
+                transition = after_transition
+                process_covariance = after_process_covariance
+            latent = (
+                latent @ transition.T
+                + monte_carlo_rng.multivariate_normal(
+                    np.zeros(spec.dim),
+                    process_covariance,
+                    size=draws,
+                )
+            )
+            future_observations.append(
+                latent
+                + monte_carlo_rng.multivariate_normal(
+                    np.zeros(spec.dim),
+                    observation_covariance,
+                    size=draws,
+                )
+            )
+
+        simulated = np.stack(future_observations, axis=1).reshape(draws, horizon * spec.dim)
+        assert np.allclose(simulated.mean(axis=0), law.mean_hd.reshape(-1), atol=0.025)
+        assert np.allclose(
+            np.cov(simulated, rowvar=False, ddof=0),
+            law.covariance_pp,
+            atol=0.035,
+        )

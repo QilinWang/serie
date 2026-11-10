@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from msgspec import Struct
+from serie.records import StructRecord, record_hash
+
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
-from attrs import define
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -23,8 +25,7 @@ logger = logging.getLogger(__name__)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@define(frozen=True, slots=True)
-class CountsReport:
+class CountsReport(StructRecord, Struct, frozen=True, kw_only=False, eq=False, weakref=True, forbid_unknown_fields=True):
     train: int
     val: int
     test: int
@@ -41,9 +42,10 @@ class CountsReport:
             return self.seq_len + self.pred_len
         return None
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True)
-class StatsReport:
+
+class StatsReport(StructRecord, Struct, frozen=True, kw_only=False, eq=False, weakref=True, forbid_unknown_fields=True):
     D: int
     col: int  # how many channels were requested
     mean: np.ndarray  # [limit]
@@ -57,9 +59,10 @@ class StatsReport:
     q75: np.ndarray
     q99: np.ndarray
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True)
-class HealthReport:
+
+class HealthReport(StructRecord, Struct, frozen=True, kw_only=False, eq=False, weakref=True, forbid_unknown_fields=True):
     """Summary of train-split distribution issues."""
 
     D: int
@@ -71,9 +74,10 @@ class HealthReport:
     sparse_channels: tuple[int, ...]
     sparse_thr: float
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True)
-class DriftReport:
+
+class DriftReport(StructRecord, Struct, frozen=True, kw_only=False, eq=False, weakref=True, forbid_unknown_fields=True):
     mean_shift_val: float  # normalized: avg |Δμ| / train_std
     mean_shift_test: float
     std_ratio_val: float  # median(σ_split / σ_train)
@@ -87,11 +91,14 @@ class DriftReport:
             or abs(self.std_ratio_test - 1.0) > self.drift_thr_ratio
         )
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True)
-class SampleReport:
+
+class SampleReport(StructRecord, Struct, frozen=True, kw_only=False, eq=False, weakref=True, forbid_unknown_fields=True):
     data: np.ndarray  # [row, c_limit]
     feature_names: tuple[str, ...]
+
+    __hash__ = record_hash
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

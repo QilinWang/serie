@@ -15,10 +15,12 @@ These tests use the public SERIE names (build_dgp_bank / inject_noise / sigma).
 
 from __future__ import annotations
 
+from msgspec.structs import replace
+
+import copy
 import dataclasses
 import json
 
-from attrs import evolve
 import numpy as np
 import polars as pl
 import pytest
@@ -26,23 +28,42 @@ import pytest
 from serie import (
     PROTOCOL_VERSION,
     DGPBank,
+    CellMaterializationSpec,
+    MaterializedCell,
     TitrationCell,
     PartitionSpec,
     DrawDesign,
+    SigmaScale,
+    SplitTreatmentScheme,
     ShockEvent,
     ShockSchedule,
     TitrationPlan,
     TrajectorySpec,
     __version__,
     export_dgp_bank_files,
+    load_materialized_cell,
     load_dgp_bank_safetensors,
+    materialize_cell,
+    save_materialized_cell,
     build_dgp_bank,
     build_empirical_dgp_bank,
     inject_noise,
 )
-from serie.api import dgp_bank_from_tensors, export_dgp_bank_safetensors, iter_cells
-from serie.catalog import LorenzParams
+from serie.api import (
+    build_clean_split_bundle,
+    dgp_bank_from_tensors,
+    export_dgp_bank_safetensors,
+    iter_cells,
+)
+from serie.catalog import LorenzParams, OUParams, SeasonalARParams
+from serie.integrators import _interpolate_params
 from serie.specs import spawn_draw_seeds
+from serie.noise import (
+    NoiseKind,
+    NoiseTemporalProcess,
+    ObservationNoiseProcess,
+    impose_temporal_dependence,
+)
 
 
 # Small, fast specs — unit tests must not integrate 36k steps.
@@ -52,6 +73,37 @@ def small_lorenz(steps: int = 400) -> TrajectorySpec:
 
 def small_ou(steps: int = 300) -> TrajectorySpec:
     return TrajectorySpec.ou(steps=steps)
+
+
+def test_stage_params_interpolate_at_progress_one_lands_exactly_on_after():
+    before = LorenzParams(sigma=10.0, rho=28.0, beta=8.0 / 3.0)
+    after = LorenzParams(sigma=10.1, rho=28.1, beta=8.1 / 3.0)
+
+    assert _interpolate_params(before, after, 1.0) == after
+
+
+def test_stage_params_interpolate_matches_two_product_lerp_form():
+    before = OUParams(theta=0.2, mu=0.0, sigma_noise=0.3)
+    after = OUParams(theta=0.8, mu=0.5, sigma_noise=0.6)
+    alpha = 0.25
+
+    result = _interpolate_params(before, after, alpha)
+
+    assert isinstance(result, OUParams)
+    assert result.theta == before.theta * (1.0 - alpha) + after.theta * alpha
+    assert result.mu == before.mu * (1.0 - alpha) + after.mu * alpha
+    assert result.sigma_noise == before.sigma_noise * (1.0 - alpha) + after.sigma_noise * alpha
+
+
+def test_stage_params_seasonal_ar_period_stays_fixed_during_interpolation():
+    before = SeasonalARParams(S=24, phi=0.5, sigma=0.2, a0=1.0, amp_drift=0.0)
+    after = SeasonalARParams(S=48, phi=0.8, sigma=0.35, a0=1.4, amp_drift=0.0)
+
+    for alpha in (0.5, 1.0):
+        result = _interpolate_params(before, after, alpha)
+        assert isinstance(result, SeasonalARParams)
+        assert result.S == before.S
+        assert result.phi == before.phi * (1.0 - alpha) + after.phi * alpha
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -114,6 +166,101 @@ class TestDeterminism:
         assert bank.noise_draw_seeds == spawn_draw_seeds(1000, 3)
         assert bank.trajectory_draw_seeds != (5, 6, 7)
         assert bank.noise_draw_seeds != (1000, 1001, 1002)
+
+
+class TestDrawProtocolPort:
+    """Exact test-function ports from ``serie-rs/src/draw_protocol.rs``."""
+
+    def test_spawned_draw_seeds_are_stable_and_not_consecutive(self):
+        seeds = spawn_draw_seeds(42, 3)
+        assert seeds == (803958421, 1820700080, 3421468131)
+        assert seeds == spawn_draw_seeds(42, 3)
+        assert seeds != (42, 43, 44)
+        assert seeds[0] != seeds[1]
+
+    def test_deterministic_auto_uses_one_trajectory_many_noise_draws(self):
+        bank = build_dgp_bank(
+            small_lorenz(),
+            seed=7,
+            noise_seed_base=1000,
+            n_trajectory_draws=1,
+            n_noise_draws=3,
+            verbose=False,
+        )
+        plan = TitrationPlan(noise_levels=(0.0, 1.0), n_trajectory_draws=1, n_noise_draws=3)
+        cells = list(iter_cells(bank, plan))
+        assert [(cell.trajectory_draw_ordinal, cell.noise_draw_ordinal) for cell in cells] == [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 0),
+            (0, 1),
+            (0, 2),
+        ]
+
+    def test_deterministic_auto_rejects_multiple_trajectory_draws(self):
+        bank = build_dgp_bank(
+            small_lorenz(),
+            seed=7,
+            noise_seed_base=1000,
+            n_trajectory_draws=2,
+            n_noise_draws=2,
+            verbose=False,
+        )
+        plan = TitrationPlan(noise_levels=(0.0,), n_trajectory_draws=2, n_noise_draws=2)
+        with pytest.raises(ValueError, match="noise_only"):
+            list(iter_cells(bank, plan))
+
+    def test_stochastic_auto_pairs_trajectory_and_noise_draws(self):
+        bank = build_dgp_bank(
+            small_ou(),
+            seed=7,
+            noise_seed_base=1000,
+            n_trajectory_draws=3,
+            n_noise_draws=3,
+            verbose=False,
+        )
+        plan = TitrationPlan(noise_levels=(0.0, 1.0), n_trajectory_draws=3, n_noise_draws=3)
+        cells = list(iter_cells(bank, plan))
+        assert [(cell.trajectory_draw_ordinal, cell.noise_draw_ordinal) for cell in cells] == [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (0, 0),
+            (1, 1),
+            (2, 2),
+        ]
+
+    @pytest.mark.parametrize(("seed", "n_noise_draws"), [(7, 3), (0, 2)])
+    def test_stochastic_auto_requires_equal_draw_counts(self, seed, n_noise_draws):
+        bank = build_dgp_bank(
+            small_ou(),
+            seed=seed,
+            noise_seed_base=1000,
+            n_trajectory_draws=1,
+            n_noise_draws=n_noise_draws,
+            verbose=False,
+        )
+        plan = TitrationPlan(noise_levels=(0.0,), n_trajectory_draws=1, n_noise_draws=n_noise_draws)
+        with pytest.raises(ValueError, match="n_trajectory_draws must equal n_noise_draws"):
+            list(iter_cells(bank, plan))
+
+    def test_stochastic_cross_product_is_explicit(self):
+        bank = build_dgp_bank(
+            small_ou(),
+            seed=7,
+            noise_seed_base=1000,
+            n_trajectory_draws=2,
+            n_noise_draws=3,
+            verbose=False,
+        )
+        plan = TitrationPlan(
+            noise_levels=(0.0,),
+            n_trajectory_draws=2,
+            n_noise_draws=3,
+            draw_design=DrawDesign.CROSS_PRODUCT,
+        )
+        assert len(list(iter_cells(bank, plan))) == 6
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -185,6 +332,188 @@ class TestPrepareFromArray:
         draw = bank.noise_draws[0][: clean.train_values.shape[0]]
         expected = clean.train_values + clean.train_stats.std[None, :] * draw
         np.testing.assert_allclose(scaled.train_values, expected, rtol=1e-5, atol=1e-5)
+
+    def test_an_observed_series_reads_back_as_the_bundle_it_was(self, tmp_path):
+        from serie.api import load_observed_series, save_observed_series
+        from serie.pipeline import NoisedSplits, StageInjectTrainScaledNoise
+
+        values = np.stack([np.linspace(-2.0, 2.0, 40, dtype=np.float32), np.linspace(10.0, 50.0, 40, dtype=np.float32)], axis=1)
+        bank = build_empirical_dgp_bank(values, name="observed", noise_seed_base=17)
+        clean = build_clean_split_bundle(bank, 0, PartitionSpec.p70_20_10(), print_diagnostics=False)
+        observed = copy.copy(clean) | StageInjectTrainScaledNoise(noise_level=0.5, noise_draw=bank.noise_draws[0], noise_on=NoisedSplits.of(("train", "val")))
+        path = save_observed_series(observed, tmp_path / "observed_series.safetensors")
+        back = load_observed_series(path)
+        np.testing.assert_array_equal(back.series, observed.series)
+        assert back.indices == tuple(observed.indices) and back.channels == 2 and back.injected_sigma == 0.5
+        assert back.dataset_id == observed.dataset_id and list(back.feature_names) == list(observed.feature_names)
+        np.testing.assert_allclose(back.train_partition_stats.std, observed.train_partition_stats.std)
+        assert back.test_partition_stats.counts == observed.test_partition_stats.counts
+        with pytest.raises(FileExistsError):
+            save_observed_series(observed, path)
+
+    def test_noise_on_names_the_splits_and_each_scheme_is_one_subset(self):
+        from serie.pipeline import NoisedSplits, StageInjectNoise
+
+        values = np.stack(
+            [
+                np.linspace(-2.0, 2.0, 40, dtype=np.float32),
+                np.linspace(10.0, 50.0, 40, dtype=np.float32),
+            ],
+            axis=1,
+        )
+        bank = build_empirical_dgp_bank(values, name="noise_on", noise_seed_base=17)
+        partition = PartitionSpec.p70_20_10()
+        clean = build_clean_split_bundle(bank, 0, partition, print_diagnostics=False)
+        draw = bank.noise_draws[0]
+        t0, t1, v0, v1, s0, s1 = clean.indices
+        for names, rows in (
+            (("train",), [(t0, t1)]),
+            (("val",), [(v0, v1)]),
+            (("test",), [(s0, s1)]),
+            (("val", "test"), [(v0, v1), (s0, s1)]),
+            (("train", "val", "test"), [(0, values.shape[0])]),
+        ):
+            db = copy.copy(clean) | StageInjectNoise(
+                noise_level=0.5, noise_draw=draw, noise_on=NoisedSplits.of(names)
+            )
+            expected = clean.series.copy()
+            for a, b in rows:
+                expected[a:b] += 0.5 * draw[a:b]
+            np.testing.assert_allclose(db.series, expected, rtol=1e-6, atol=1e-6)
+        for scheme, names in (
+            (SplitTreatmentScheme.NOISE_MATCHED_RETRAINING, ("train", "val", "test")),
+            (SplitTreatmentScheme.CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION, ("test",)),
+            (SplitTreatmentScheme.NOISE_TRAIN_NOISE_SELECT_CLEAN_TEST, ("train", "val")),
+        ):
+            assert NoisedSplits.of_scheme(scheme).names() == names
+        with pytest.raises(ValueError, match="non-empty subset"):
+            NoisedSplits.of(())
+        with pytest.raises(ValueError, match="non-empty subset"):
+            NoisedSplits.of(("training",))
+
+    def test_csr_scheme_keeps_train_and_validation_clean_and_titrates_only_test(self):
+        values = np.stack(
+            [
+                np.linspace(-2.0, 2.0, 40, dtype=np.float32),
+                np.linspace(10.0, 50.0, 40, dtype=np.float32),
+            ],
+            axis=1,
+        )
+        bank = build_empirical_dgp_bank(values, name="csr", noise_seed_base=17)
+        partition = PartitionSpec.p70_20_10()
+        clean = inject_noise(bank, sigma=0.0, partition=partition)
+        dose = 0.5
+        treated = inject_noise(
+            bank,
+            sigma=dose,
+            sigma_scale="train_std",
+            partition=partition,
+            split_treatment_scheme=SplitTreatmentScheme.CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION,
+        )
+
+        np.testing.assert_array_equal(treated.train_values, clean.train_values)
+        np.testing.assert_array_equal(treated.val_values, clean.val_values)
+        test_start, test_end = clean.indices[4], clean.indices[5]
+        expected_test = clean.test_values + dose * (
+            clean.train_stats.std[None, :] * bank.noise_draws[0][test_start:test_end]
+        )
+        np.testing.assert_allclose(treated.test_values, expected_test, rtol=1e-5, atol=1e-5)
+        assert (
+            treated.metadata["split_treatment_scheme"] == "clean_train_clean_select_test_titration"
+        )
+
+    def test_return_to_clean_scheme_titrates_train_and_validation_only(self):
+        values = np.stack(
+            [
+                np.linspace(-2.0, 2.0, 40, dtype=np.float32),
+                np.linspace(10.0, 50.0, 40, dtype=np.float32),
+            ],
+            axis=1,
+        )
+        bank = build_empirical_dgp_bank(values, name="return_to_clean", noise_seed_base=17)
+        partition = PartitionSpec.p70_20_10()
+        clean = inject_noise(bank, sigma=0.0, partition=partition)
+        dose = 0.5
+        treated = inject_noise(
+            bank,
+            sigma=dose,
+            sigma_scale="train_std",
+            partition=partition,
+            split_treatment_scheme=SplitTreatmentScheme.NOISE_TRAIN_NOISE_SELECT_CLEAN_TEST,
+        )
+
+        train_start, train_end, val_start, val_end, _, _ = clean.indices
+        expected_train = clean.train_values + dose * (
+            clean.train_stats.std[None, :] * bank.noise_draws[0][train_start:train_end]
+        )
+        expected_val = clean.val_values + dose * (
+            clean.train_stats.std[None, :] * bank.noise_draws[0][val_start:val_end]
+        )
+        np.testing.assert_allclose(treated.train_values, expected_train, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(treated.val_values, expected_val, rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(treated.test_values, clean.test_values)
+        assert treated.metadata["split_treatment_scheme"] == "noise_train_noise_select_clean_test"
+
+    def test_relative_test_titration_has_paired_algebra_and_no_scale_leakage(self):
+        values = np.stack(
+            [
+                np.linspace(-3.0, 3.0, 100, dtype=np.float32),
+                np.linspace(20.0, 80.0, 100, dtype=np.float32),
+            ],
+            axis=1,
+        )
+        partition = PartitionSpec.p70_20_10()
+        bank = build_empirical_dgp_bank(values, name="paired_canary", noise_seed_base=31)
+        clean = inject_noise(bank, sigma=0.0, partition=partition)
+        dose_low = 0.25
+        dose_high = 1.0
+        low = inject_noise(
+            bank,
+            sigma=dose_low,
+            sigma_scale="train_std",
+            partition=partition,
+            split_treatment_scheme=SplitTreatmentScheme.CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION,
+        )
+        high = inject_noise(
+            bank,
+            sigma=dose_high,
+            sigma_scale="train_std",
+            partition=partition,
+            split_treatment_scheme=SplitTreatmentScheme.CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION,
+        )
+
+        test_start, test_end = clean.indices[4], clean.indices[5]
+        scaled_test_draw = clean.train_stats.std[None, :] * bank.noise_draws[0][test_start:test_end]
+        np.testing.assert_allclose(
+            low.test_values - clean.test_values,
+            dose_low * scaled_test_draw,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            high.test_values - clean.test_values,
+            (dose_high / dose_low) * (low.test_values - clean.test_values),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        test_perturbed_values = values.copy()
+        test_perturbed_values[test_start:test_end] += np.array(
+            [10_000.0, -20_000.0], dtype=np.float32
+        )
+        perturbed_bank = build_empirical_dgp_bank(
+            test_perturbed_values,
+            name="paired_canary_test_perturbed",
+            noise_seed_base=31,
+        )
+        perturbed = inject_noise(
+            perturbed_bank,
+            sigma=dose_low,
+            sigma_scale="train_std",
+            partition=partition,
+            split_treatment_scheme=SplitTreatmentScheme.CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION,
+        )
+        np.testing.assert_array_equal(perturbed.train_stats.std, low.train_stats.std)
 
 
 class TestNoiseKinds:
@@ -275,6 +604,65 @@ class TestNoiseKinds:
 
         with pytest.raises(ValueError, match="shape"):
             build_dgp_bank(small_lorenz(), noise_kind=wrong_shape, verbose=False)
+
+
+def _stage_dgp_bank_noise(kind: str, *, timesteps: int = 10_000) -> DGPBank:
+    """Use a fixed empirical clean path so the test isolates observation noise."""
+    return build_empirical_dgp_bank(
+        np.zeros((timesteps, 1), dtype=np.float32),
+        name=f"pass8_{kind}",
+        noise_kind=kind,
+        noise_seed_base=1_000,
+    )
+
+
+def test_stage_dgp_bank_student_t3_variance_and_heavy_tails():
+    bank = _stage_dgp_bank_noise("student_t3")
+    values = bank.noise_draws.reshape(-1).astype(np.float64)
+    assert bank.noise_kind == "student_t3"
+    assert abs(float(values.mean())) < 0.05
+    assert abs(float(values.var()) - 1.0) < 0.3
+    assert int(np.count_nonzero(np.abs(values) > 4.0)) >= 5
+
+
+def test_stage_dgp_bank_extending_noise_draws_preserves_prefix():
+    values = np.zeros((257, 3), dtype=np.float32)
+    for kind in ("gaussian", "laplace", "student_t3", "contaminated"):
+        four = build_empirical_dgp_bank(
+            values,
+            name=f"pass8_prefix_{kind}",
+            n_noise_draws=4,
+            noise_seed_base=1_000,
+            noise_kind=kind,
+        )
+        eight = build_empirical_dgp_bank(
+            values,
+            name=f"pass8_prefix_{kind}",
+            n_noise_draws=8,
+            noise_seed_base=1_000,
+            noise_kind=kind,
+        )
+        np.testing.assert_array_equal(four.noise_draws, eight.noise_draws[:4])
+
+
+def test_stage_dgp_bank_laplace_variance_and_middle_tails():
+    bank = _stage_dgp_bank_noise("laplace")
+    values = bank.noise_draws.reshape(-1).astype(np.float64)
+    tail_count = int(np.count_nonzero(np.abs(values) > 4.0))
+    assert bank.noise_kind == "laplace"
+    assert abs(float(values.mean())) < 0.03
+    assert abs(float(values.var()) - 1.0) < 0.08
+    assert 5 <= tail_count <= 120
+
+
+def test_stage_dgp_bank_contaminated_variance_and_sparse_tails():
+    bank = _stage_dgp_bank_noise("contaminated", timesteps=200_000)
+    values = bank.noise_draws.reshape(-1).astype(np.float64)
+    tail_count = int(np.count_nonzero(np.abs(values) > 4.0))
+    assert bank.noise_kind == "contaminated"
+    assert abs(float(values.mean())) < 0.03
+    assert abs(float(values.var()) - 1.0) < 0.08
+    assert 1_200 <= tail_count <= 2_800
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -381,14 +769,18 @@ class TestPartition:
 
 
 class TestPartitionValidation:
-    def test_overlapping_val_test_rejected(self):
-        with pytest.raises(ValueError, match="bounds invalid"):
+    @pytest.mark.parametrize(
+        ("val_start", "test_start", "error"),
+        [(0.6, 0.9, "Val bounds invalid"), (0.7, 0.85, "Test bounds invalid")],
+    )
+    def test_overlapping_partition_boundaries_are_rejected(self, val_start, test_start, error):
+        with pytest.raises(ValueError, match=error):
             PartitionSpec(
                 train_start=0.0,
                 train_end=0.7,
-                val_start=0.6,
+                val_start=val_start,
                 val_end=0.9,
-                test_start=0.85,
+                test_start=test_start,
                 test_end=1.0,
             )
 
@@ -428,7 +820,12 @@ class TestErrorContracts:
         assert "not_a_system" in message
         assert "lorenz" in message  # the fix is in the message
 
-    def test_string_coercion_is_case_and_dash_tolerant(self):
+    def test_source_catalog_accepts_case_and_dash_in_a_preset_name(self):
+        from serie.catalog import source_preset
+
+        assert source_preset("LORENZ-PARAM-SHOCK") is source_preset("lorenz_param_shock")
+
+    def test_bank_string_coercion_is_case_insensitive(self):
         a = build_dgp_bank("LORENZ", seed=0, verbose=False)
         b = build_dgp_bank("lorenz", seed=0, verbose=False)
         np.testing.assert_array_equal(a.clean, b.clean)
@@ -441,7 +838,18 @@ class TestErrorContracts:
         from serie import KnownMeta
 
         with pytest.raises(ValueError, match="n_trajectory_draws=1"):
-            build_dgp_bank(KnownMeta.etth1(), n_trajectory_draws=2, verbose=False)
+            build_dgp_bank(KnownMeta.etth1(), seed=0, n_trajectory_draws=2, verbose=False)
+
+    def test_known_data_requires_zero_trajectory_seed_before_asset_load(self):
+        from serie import KnownMeta
+
+        # The seed refusal happens before any file access. The zero-seed case
+        # reaches the independent draw-count guard, proving it is not refused
+        # merely for being a known recording.
+        with pytest.raises(ValueError, match=r"trajectory_seed_base=0; got seed=7"):
+            build_dgp_bank(KnownMeta.etth1(), seed=7, n_trajectory_draws=2, verbose=False)
+        with pytest.raises(ValueError, match="n_trajectory_draws=1"):
+            build_dgp_bank(KnownMeta.etth1(), seed=0, n_trajectory_draws=2, verbose=False)
 
 
 class TestProvenance:
@@ -458,6 +866,9 @@ class TestProvenance:
                 clean=clean,
                 noise_draws=noise_draws,
                 feature_names=("x", "y"),
+                is_stochastic=False,
+                noise_kind="gaussian",
+                noise_ar1_phi=0.0,
             )
 
     def test_bank_rejects_out_of_range_draw_ordinals(self):
@@ -491,6 +902,12 @@ class TestProvenance:
         assert split.metadata["trajectory_draw_seed"] == bank.trajectory_draw_seeds[0]
         assert split.metadata["noise_draw_seed"] == bank.noise_draw_seeds[0]
 
+    def test_synthetic_source_identity_survives_noise_injection(self):
+        bank = build_dgp_bank(small_lorenz(), seed=0, verbose=False)
+        split = inject_noise(bank, sigma=0.1, partition=PartitionSpec.p70_20_10())
+        assert bank.name == "lorenz"
+        assert split.source_id == bank.name
+
     def test_shape_contract_includes_initial_condition_row(self):
         spec = TrajectorySpec.ou(steps=123, burn_in=7)
         bank = build_dgp_bank(spec, seed=0, verbose=False)
@@ -513,52 +930,6 @@ class TestProvenance:
             for c in titration_cells
         }
         assert len(cells) == 8  # no duplicates
-
-    def test_deterministic_auto_uses_one_clean_path_and_many_noise_draws(self):
-        bank = build_dgp_bank(
-            small_lorenz(), seed=0, n_trajectory_draws=1, n_noise_draws=3, verbose=False
-        )
-        plan = TitrationPlan(noise_levels=(0.0, 1.0), n_trajectory_draws=1, n_noise_draws=3)
-        cells = list(iter_cells(bank, plan))
-        assert [(c.trajectory_draw_ordinal, c.noise_draw_ordinal) for c in cells] == [
-            (0, 0),
-            (0, 1),
-            (0, 2),
-            (0, 0),
-            (0, 1),
-            (0, 2),
-        ]
-
-    def test_deterministic_auto_rejects_multiple_trajectory_draws(self):
-        bank = build_dgp_bank(
-            small_lorenz(), seed=0, n_trajectory_draws=2, n_noise_draws=2, verbose=False
-        )
-        plan = TitrationPlan(noise_levels=(0.0,), n_trajectory_draws=2, n_noise_draws=2)
-        with pytest.raises(ValueError, match="noise_only"):
-            list(iter_cells(bank, plan))
-
-    def test_stochastic_auto_pairs_trajectory_and_noise_draws(self):
-        bank = build_dgp_bank(
-            small_ou(), seed=0, n_trajectory_draws=3, n_noise_draws=3, verbose=False
-        )
-        plan = TitrationPlan(noise_levels=(0.0, 1.0), n_trajectory_draws=3, n_noise_draws=3)
-        cells = list(iter_cells(bank, plan))
-        assert [(c.trajectory_draw_ordinal, c.noise_draw_ordinal) for c in cells] == [
-            (0, 0),
-            (1, 1),
-            (2, 2),
-            (0, 0),
-            (1, 1),
-            (2, 2),
-        ]
-
-    def test_stochastic_joint_requires_equal_rep_counts(self):
-        bank = build_dgp_bank(
-            small_ou(), seed=0, n_trajectory_draws=1, n_noise_draws=2, verbose=False
-        )
-        plan = TitrationPlan(noise_levels=(0.0,), n_trajectory_draws=1, n_noise_draws=2)
-        with pytest.raises(ValueError, match="n_trajectory_draws must equal n_noise_draws"):
-            list(iter_cells(bank, plan))
 
     def test_stochastic_path_fixed_is_explicit_diagnostic(self):
         bank = build_dgp_bank(
@@ -590,6 +961,86 @@ class TestProvenance:
         cell = bank.cell(noise_level=0.1, trajectory_draw_ordinal=1, noise_draw_ordinal=1)
         with pytest.raises(ValueError, match="draw mismatch"):
             build_noisy_bundle_for_cell(bank, db_clean, cell)
+
+    @pytest.mark.parametrize(
+        ("override", "message"),
+        [
+            ({"trajectory_draw_ordinal": True}, "trajectory_draw_ordinal"),
+            ({"trajectory_draw_ordinal": -1}, "trajectory_draw_ordinal"),
+            ({"noise_draw_ordinal": -1}, "noise_draw_ordinal"),
+            ({"sigma": np.float32(-0.1)}, "sigma"),
+            ({"sigma": np.float32(np.nan)}, "sigma"),
+            ({"sigma_scale": "unknown"}, "unknown"),
+        ],
+    )
+    def test_materialization_spec_refuses_invalid_boundary_values(self, override, message):
+        fields = {
+            "trajectory_draw_ordinal": 0,
+            "noise_draw_ordinal": 0,
+            "sigma": np.float32(0.25),
+            "partition": PartitionSpec.p70_20_10(),
+            "split_treatment": SplitTreatmentScheme.NOISE_MATCHED_RETRAINING,
+            "sigma_scale": SigmaScale.UNIT,
+        }
+        fields.update(override)
+
+        with pytest.raises((ValueError, TypeError), match=message):
+            CellMaterializationSpec(**fields)
+
+    def test_materialized_cell_is_a_standalone_serie_artifact(self, tmp_path):
+        values = np.stack(
+            [
+                np.linspace(-3.0, 3.0, 100, dtype=np.float32),
+                np.linspace(20.0, 80.0, 100, dtype=np.float32),
+            ],
+            axis=1,
+        )
+        bank = build_empirical_dgp_bank(values, name="standalone_cell", noise_seed_base=31)
+        spec = CellMaterializationSpec(
+            trajectory_draw_ordinal=0,
+            noise_draw_ordinal=0,
+            sigma=np.float32(0.25),
+            partition=PartitionSpec.p70_20_10(),
+            split_treatment=SplitTreatmentScheme.CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION,
+            sigma_scale=SigmaScale.TRAIN_STD,
+        )
+
+        materialized = materialize_cell(bank, spec)
+
+        assert isinstance(materialized, MaterializedCell)
+        np.testing.assert_array_equal(materialized.clean, values)
+        np.testing.assert_array_equal(materialized.observed[:80], values[:80])
+        test_start, test_end = materialized.split_indices[4:]
+        expected_test = values[test_start:test_end] + spec.sigma * (
+            materialized.clean_train_stats.std[None, :] * bank.noise_draws[0][test_start:test_end]
+        )
+        np.testing.assert_allclose(
+            materialized.observed[test_start:test_end],
+            expected_test,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        path = tmp_path / "materialized_cell.safetensors"
+        manifest = save_materialized_cell(materialized, path)
+        reopened = load_materialized_cell(path)
+
+        assert manifest["schema"] == "serie.materialized_cell_safetensors.v1"
+        assert manifest["stats_source"] == "clean_partitions"
+        assert reopened.spec == spec
+        assert reopened.cell == materialized.cell
+        assert reopened.feature_names == materialized.feature_names
+        np.testing.assert_array_equal(reopened.clean, materialized.clean)
+        np.testing.assert_array_equal(reopened.observed, materialized.observed)
+        np.testing.assert_array_equal(reopened.unit_noise, materialized.unit_noise)
+        np.testing.assert_array_equal(
+            reopened.clean_train_stats.std, materialized.clean_train_stats.std
+        )
+        second_path = tmp_path / "materialized_cell_second.safetensors"
+        save_materialized_cell(materialized, second_path)
+        assert second_path.read_bytes() == path.read_bytes()
+        with pytest.raises(FileExistsError):
+            save_materialized_cell(materialized, path)
 
     def test_export_dgp_bank_files_writes_arrays_tables_and_manifest(self, tmp_path):
         bank = build_dgp_bank(small_lorenz(), seed=0, verbose=False)
@@ -656,7 +1107,9 @@ class TestProvenance:
         # contract the Rust-generated bank handoff relies on (the serie-rs
         # writer emits the same header, so a bank from either engine passes
         # DGPBank's spawn-consistency validators on load).
-        bank = build_dgp_bank(small_ou(), seed=42, n_trajectory_draws=2, n_noise_draws=3, verbose=False)
+        bank = build_dgp_bank(
+            small_ou(), seed=42, n_trajectory_draws=2, n_noise_draws=3, verbose=False
+        )
         path = tmp_path / "dgp_bank.safetensors"
         export_dgp_bank_safetensors(bank, path)
 
@@ -698,7 +1151,7 @@ class TestProvenance:
 
     def test_param_shift_matches_regular_before_shock_then_diverges(self):
         base = small_lorenz(steps=600)
-        shifted = evolve(
+        shifted = replace(
             base,
             shocks=ShockSchedule.single(
                 ShockEvent.params_step_change(
@@ -809,3 +1262,78 @@ class TestStageOrder:
             atol=1e-5,
         )
         assert not np.allclose(noisy.train_stats.mean, clean.train_stats.mean)
+
+
+# Exact semantic ports of the six Rust `dgp_bank::ar1_tests` functions.  The
+# random stream is intentionally NumPy-owned for the `serie_py` engine; these
+# assertions preserve the scientific process, not Rust PCG byte identity.
+def _ar1_draws(phi: float) -> np.ndarray:
+    innovations = np.random.default_rng(4242).standard_normal((1, 60_000, 1)).astype(np.float32)
+    process = ObservationNoiseProcess.from_wire(NoiseKind.GAUSSIAN, phi)
+    return impose_temporal_dependence(innovations, process).reshape(-1)
+
+
+def test_ar1_preserves_unit_variance_at_every_phi():
+    for phi in (0.0, 0.5, 0.9, -0.5):
+        values = _ar1_draws(phi).astype(np.float64)
+        variance = float(values.var())
+        effective = values.size * (1.0 - phi) / (1.0 + phi)
+        tolerance = 4.0 * np.sqrt(2.0 / effective)
+        assert abs(variance - 1.0) < tolerance, (
+            f"phi={phi} gave variance {variance}, outside {tolerance:.4f} of 1"
+        )
+
+
+def test_ar1_lag_one_autocorrelation_equals_phi():
+    for phi in (0.5, 0.9, -0.5):
+        values = _ar1_draws(phi).astype(np.float64)
+        centred = values - values.mean()
+        measured = float(np.mean(centred[:-1] * centred[1:]) / np.mean(centred * centred))
+        assert abs(measured - phi) < 0.02, f"phi={phi} measured lag-1 autocorrelation {measured}"
+
+
+def test_ar1_phi_zero_is_bitwise_identical_to_the_plain_gaussian_draw():
+    plain = np.random.default_rng(99).standard_normal((2, 128, 3)).astype(np.float32)
+    iid = ObservationNoiseProcess.from_wire(NoiseKind.GAUSSIAN, 0.0)
+    filtered = impose_temporal_dependence(plain, iid)
+    np.testing.assert_array_equal(plain, filtered)
+
+
+def test_ar1_process_constructor_refuses_invalid_wire_combinations():
+    with pytest.raises(ValueError, match="requires gaussian"):
+        ObservationNoiseProcess.from_wire(NoiseKind.STUDENT_T3, 0.5)
+    with pytest.raises(ValueError, match="requires gaussian"):
+        ObservationNoiseProcess.from_wire(NoiseKind.LAPLACE, -0.5)
+    with pytest.raises(ValueError, match=r"lie in \(-1, 1\)"):
+        ObservationNoiseProcess.from_wire(NoiseKind.GAUSSIAN, 1.0)
+    with pytest.raises(ValueError, match="finite"):
+        ObservationNoiseProcess.from_wire(NoiseKind.GAUSSIAN, float("nan"))
+
+    iid = ObservationNoiseProcess.from_wire(NoiseKind.STUDENT_T3, 0.0)
+    assert iid.innovation_kind is NoiseKind.STUDENT_T3
+    assert iid.temporal_process is NoiseTemporalProcess.IID
+
+
+def test_ar1_metadata_is_explicit_and_iid_metadata_stays_legacy_compatible():
+    iid = ObservationNoiseProcess.from_wire(NoiseKind.GAUSSIAN, 0.0)
+    assert iid.artifact_metadata() == {}
+
+    ar1 = ObservationNoiseProcess.from_wire(NoiseKind.GAUSSIAN, 0.9)
+    assert ar1.artifact_metadata() == {
+        "noise_temporal_process": "ar1",
+        "noise_ar1_phi": 0.9,
+    }
+
+
+def test_ar1_filters_each_channel_independently():
+    innovations = np.array(
+        [[[1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]]],
+        dtype=np.float32,
+    )
+    process = ObservationNoiseProcess.from_wire(NoiseKind.GAUSSIAN, 0.5)
+    filtered = impose_temporal_dependence(innovations, process)
+    np.testing.assert_array_equal(filtered[0, :, 1], np.zeros(4, dtype=np.float32))
+    assert not np.array_equal(filtered[0, :, 0], innovations[0, :, 0])
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

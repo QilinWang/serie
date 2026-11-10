@@ -18,7 +18,18 @@ secrets.*
 .claude/
 
 # Large/local data and generated outputs
-/assets/
+/assets/**
+# A directory rule stops git descending, and a negation it never reaches does
+# nothing; `/assets/**` with the directories re-included is what makes the two
+# rules below actually fire. The tree is 21 files, so the walk costs nothing.
+!/assets/**/
+# ...but not the code that BUILDS a prepared asset, nor the manifest that
+# records what it built. The tensors are regenerable and huge; the builder and
+# its manifest are the provenance of a benchmark world (which recording, which
+# rows, which columns, which sha256), so a paper world stays reproducible only
+# if they are tracked.
+!/assets/**/build_*.py
+!/assets/**/*_manifest.json
 tmp/
 release_artifacts/
 

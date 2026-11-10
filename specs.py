@@ -15,42 +15,25 @@ Design principles:
 
 from __future__ import annotations
 
+from msgspec import Struct, field as struct_field
+from serie.records import StructRecord, record_hash
+
 from enum import StrEnum, auto
 from typing import TYPE_CHECKING
+import json
 import numpy as np
-from attrs import (
-    define,
-    field,
-)
-from attrs.validators import ge, le
 
 if TYPE_CHECKING:
     from .pipeline import DataBundle
+    from .integrators import StepShockSchedule
 
 # System parameter classes, SystemParams union, ODESystem enum → catalog.py
 from .catalog import (  # noqa: E402
     SystemParams,
     ODESystem,
 )
-
-
-def spawn_draw_seeds(seed: int, n: int) -> tuple[int, ...]:
-    """Spawn independent per-draw seeds from one root entropy value.
-
-    Mirrors the ``serie-rs`` SplitMix64 draw derivation and returns
-    uint32-compatible child seeds. The root seed plus draw ordinal is the
-    reproducible recipe.
-    """
-    if n < 1:
-        raise ValueError(f"n must be >= 1, got {n}")
-    seed_base = int(seed) & 0xFFFFFFFFFFFFFFFF
-    seeds: list[int] = []
-    for draw_ordinal in range(n):
-        x = seed_base ^ ((0x9E3779B97F4A7C15 * (draw_ordinal + 1)) & 0xFFFFFFFFFFFFFFFF)
-        x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
-        x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
-        seeds.append(int((x ^ (x >> 31)) & 0xFFFFFFFF))
-    return tuple(seeds)
+from .data import spawn_draw_seeds
+from .noise import NoiseTemporalProcess
 
 
 _ODE_METHOD_SYSTEMS = frozenset(
@@ -63,6 +46,16 @@ _ODE_METHOD_SYSTEMS = frozenset(
         ODESystem.VANDERPOL,
         ODESystem.LORENZ96,
         ODESystem.DIAGONAL,
+        ODESystem.SPROTT_A,
+        ODESystem.AIZAWA,
+        ODESystem.THOMAS,
+        ODESystem.HENON_HEILES,
+        ODESystem.COUPLED_ROESSLER,
+        ODESystem.LORENZ84,
+        ODESystem.DOUBLE_PENDULUM,
+        ODESystem.FITZHUGH_NAGUMO,
+        ODESystem.HINDMARSH_ROSE,
+        ODESystem.RIKITAKE,
     }
 )
 _MAP_METHOD_SYSTEMS = frozenset({ODESystem.HENON, ODESystem.LOGISTIC})
@@ -72,6 +65,7 @@ _EULER_METHOD_SYSTEMS = frozenset(
         ODESystem.DOUBLEWELL,
         ODESystem.SLDS,
         ODESystem.SEASONAL_AR,
+        ODESystem.SEASONAL_AR_BJ,  # CHG 2026-10-06
         ODESystem.GARCH,
     }
 )
@@ -79,8 +73,15 @@ _EULER_METHOD_SYSTEMS = frozenset(
 # region TrajectorySpec
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class TrajectorySpec:
+class TrajectorySpec(
+    StructRecord,
+    Struct,
+    frozen=True,
+    kw_only=True,
+    eq=False,
+    weakref=True,
+    forbid_unknown_fields=True,
+):
     """Specification for generating one synthetic dynamical system trajectory.
     用于生成一条合成动力学系统轨迹的规格说明。
 
@@ -111,12 +112,18 @@ class TrajectorySpec:
     burn_in: int
     method: str = "rk4"  # integration method, set per-system in classmethods
     x0: tuple[float, ...] | None = None  # None → bridge picks default
-    shocks: "ShockSchedule" = field(factory=lambda: ShockSchedule.none())
+    shocks: "ShockSchedule" = struct_field(default_factory=lambda: ShockSchedule.none())
 
-    def __attrs_post_init__(self) -> None:
-        if self.system in _ODE_METHOD_SYSTEMS and self.method not in {"rk4", "euler"}:
+    def __post_init__(self) -> None:
+        if self.system in _ODE_METHOD_SYSTEMS and self.method not in {
+            "rk4",
+            "euler",
+            "tsit5_fixed",
+            "tsit5_adaptive",
+        }:
             raise ValueError(
-                f"{self.system.value} expects method 'rk4' or 'euler', got {self.method!r}"
+                f"{self.system.value} expects method 'rk4', 'euler', 'tsit5_fixed', "
+                f"or 'tsit5_adaptive', got {self.method!r}"
             )
         if self.system in _MAP_METHOD_SYSTEMS and self.method != "map":
             raise ValueError(f"{self.system.value} expects method 'map', got {self.method!r}")
@@ -129,10 +136,6 @@ class TrajectorySpec:
     def T(self) -> float:
         """Total physical time = steps * dt."""
         return self.steps * self.dt
-
-    @property
-    def n_usable_steps(self) -> int:
-        return self.steps - self.burn_in
 
     @property
     def tag(self) -> str:
@@ -163,6 +166,8 @@ class TrajectorySpec:
     def load(
         self,
         seed: int = 0,
+        *,
+        step_schedule: StepShockSchedule | None = None,
     ) -> "DataBundle":
         """Load one clean trajectory into a DataBundle.
 
@@ -179,6 +184,7 @@ class TrajectorySpec:
         return db | StageLoadSynthetic(
             trajectory_spec=self,
             seed=seed,
+            step_schedule=step_schedule,
         )
 
     # ══════════════════════════════════════════════════════════════════
@@ -329,6 +335,7 @@ class TrajectorySpec:
     def slds_moe(cls, **kw) -> "TrajectorySpec":
         """SLDS with maximally distinct regimes — MOE diagnostic. SLDS最大化体制差异——MOE诊断用。"""
         from .catalog import slds_moe_spec
+
         return slds_moe_spec(**kw)
 
     @classmethod
@@ -358,6 +365,13 @@ class TrajectorySpec:
         from .catalog import seasonal_ar_param_shock_spec
 
         return seasonal_ar_param_shock_spec()
+
+    @classmethod
+    def seasonal_ar_bj(cls, **kw) -> "TrajectorySpec":
+        """1D Box–Jenkins seasonal AR, lags 1 and S, no deterministic season (stochastic). CHG 2026-10-06."""
+        from .catalog import seasonal_ar_bj_spec
+
+        return seasonal_ar_bj_spec(**kw)
 
     @classmethod
     def garch(cls, **kw) -> "TrajectorySpec":
@@ -408,6 +422,8 @@ class TrajectorySpec:
 
         return diagonal_spec(**kw)
 
+    __hash__ = record_hash
+
 
 class ShockType(StrEnum):
     """What kind of perturbation is applied. 施加哪种类型的扰动。"""
@@ -424,8 +440,15 @@ class ShockType(StrEnum):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class ShockEvent:
+class ShockEvent(
+    StructRecord,
+    Struct,
+    frozen=True,
+    kw_only=True,
+    eq=False,
+    weakref=True,
+    forbid_unknown_fields=True,
+):
     """One designed perturbation (intervention) on the trajectory timeline.
     轨迹时间线上的一次设计性扰动（干预）。
 
@@ -450,9 +473,9 @@ class ShockEvent:
     shocktype: ShockType
 
     # ── Timing ──
-    t_start: float = field(validator=[ge(0.0), le(1.0)])  # type: ignore
-    t_end: float = field(validator=[ge(0.0), le(1.0)])  # type: ignore
-    n_inserts: int = field(default=1, validator=ge(1))  # type: ignore
+    t_start: float  # type: ignore
+    t_end: float  # type: ignore
+    n_inserts: int = 1  # type: ignore
 
     # ── For ODE_PARAMS target (wholesale replacement) ──
     params_after: SystemParams | None = None
@@ -465,7 +488,18 @@ class ShockEvent:
     ic_b: tuple[float, ...] | None = None
     # params_after reused for the B-trajectory params
 
-    def __attrs_post_init__(self) -> None:
+    def __post_init__(self) -> None:
+        # CHG: converters and field checks ran before the attrs post-init.
+        if not self.t_start >= 0.0:
+            raise ValueError(f"'t_start' must be >= 0.0: {self.t_start}")
+        if not self.t_start <= 1.0:
+            raise ValueError(f"'t_start' must be <= 1.0: {self.t_start}")
+        if not self.t_end >= 0.0:
+            raise ValueError(f"'t_end' must be >= 0.0: {self.t_end}")
+        if not self.t_end <= 1.0:
+            raise ValueError(f"'t_end' must be <= 1.0: {self.t_end}")
+        if not self.n_inserts >= 1:
+            raise ValueError(f"'n_inserts' must be >= 1: {self.n_inserts}")
         if self.t_end < self.t_start:
             raise ValueError(
                 f"ShockEvent '{self.name}' has t_end={self.t_end} before t_start={self.t_start}"
@@ -569,9 +603,18 @@ class ShockEvent:
             params_after=params_after,
         )
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True, kw_only=True)
-class ShockSchedule:
+
+class ShockSchedule(
+    StructRecord,
+    Struct,
+    frozen=True,
+    kw_only=True,
+    eq=False,
+    weakref=True,
+    forbid_unknown_fields=True,
+):
     """Time-ordered sequence of interventions on a trajectory. Empty = no shocks.
     轨迹上的时间排序干预序列。空 = 无冲击（静态基线）。
 
@@ -587,7 +630,7 @@ class ShockSchedule:
 
     events: tuple[ShockEvent, ...] = ()
 
-    def __attrs_post_init__(self) -> None:
+    def __post_init__(self) -> None:
         if len(self.events) > 1 and any(
             e.shocktype == ShockType.TRAJECTORY_SWITCH for e in self.events
         ):
@@ -627,9 +670,18 @@ class ShockSchedule:
     def multiple(cls, *events: ShockEvent) -> ShockSchedule:
         return cls(events=events)
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True, kw_only=True)
-class TitrationCell:
+
+class TitrationCell(
+    StructRecord,
+    Struct,
+    frozen=True,
+    kw_only=True,
+    eq=False,
+    weakref=True,
+    forbid_unknown_fields=True,
+):
     """One point in a noise-dose sweep: a specific (noise_level, trajectory_draw,
     noise_draw) combination, with full seed provenance for reproducibility.
     噪声剂量扫描中的一个点：特定的（噪声水平、轨迹抽取、噪声抽取）组合，
@@ -655,14 +707,23 @@ class TitrationCell:
         level = f"{self.noise_level:g}"  # compact: 0.1, 0.001, 1e-05
         return f"{self.source_name}_traj{self.trajectory_draw_ordinal}_sig{level}_noise{self.noise_draw_ordinal}"
 
+    __hash__ = record_hash
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # DGPBank — factored clean trajectories plus reusable noise draws
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class DGPBank:
+class DGPBank(
+    StructRecord,
+    Struct,
+    frozen=True,
+    kw_only=True,
+    eq=False,
+    weakref=True,
+    forbid_unknown_fields=True,
+):
     """Pre-computed clean trajectories and frozen noise arrays for one
     data-generating process (DGP). Build once, then inject noise many times.
     一个数据生成过程（DGP）的预计算干净轨迹和冻结噪声数组。构建一次，然后多次注入噪声。
@@ -694,13 +755,37 @@ class DGPBank:
     feature_names: tuple[str, ...]
     # True for stochastic generators whose trajectory draws are distinct
     # future trajectory draws, not repeated deterministic clean paths.
-    is_stochastic: bool = False
-    # Which noise law the draws follow: "gaussian", "laplace", or "custom".
+    is_stochastic: bool
+    # Which innovation law the draws follow: gaussian, laplace, student_t3,
+    # contaminated, or a custom IID sampler.
     # Provenance for downstream statistical tests — the protocol requires the
     # injected law to be exactly known, not necessarily Gaussian.
-    noise_kind: str = "gaussian"
+    noise_kind: str
+    # Zero means IID. A nonzero value is a stationary AR(1) coefficient and
+    # is admitted only with Gaussian innovations.
+    noise_ar1_phi: float
+    # CHG: when a named synthetic source carries a frozen intervention law,
+    # preserve that declaration with the bank and its exports, not just its name.
+    source_declaration: str | None = None
 
-    def __attrs_post_init__(self) -> None:
+    def __post_init__(self) -> None:
+        if self.source_declaration is not None:
+            try:
+                declared = json.loads(self.source_declaration)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("source_declaration must be a JSON object") from exc
+            if not isinstance(declared, dict):
+                raise ValueError("source_declaration must be a JSON object")
+        phi = float(self.noise_ar1_phi)
+        if not np.isfinite(phi) or not -1.0 < phi < 1.0:
+            raise ValueError(
+                f"noise_ar1_phi must be finite and lie in (-1, 1), got {self.noise_ar1_phi}"
+            )
+        if phi != 0.0 and self.noise_kind != "gaussian":
+            raise ValueError(
+                "nonzero noise_ar1_phi requires gaussian innovations, "
+                f"got noise_kind={self.noise_kind!r}"
+            )
         if self.clean.ndim != 3:
             raise ValueError(f"clean must have shape [N_trajectory, T, D], got {self.clean.shape}")
         if self.noise_draws.ndim != 3:
@@ -743,6 +828,14 @@ class DGPBank:
                 "noise_seed_base, n_noise_draws); "
                 "the draw ordinal is part of the reproducible seed recipe"
             )
+
+    @property
+    def noise_temporal_process(self) -> NoiseTemporalProcess:
+        """Closed temporal structure recorded by this bank."""
+
+        if self.noise_ar1_phi == 0.0:
+            return NoiseTemporalProcess.IID
+        return NoiseTemporalProcess.AR1
 
     def _check_cell(self, trajectory_draw_ordinal: int, noise_draw_ordinal: int) -> None:
         if not 0 <= trajectory_draw_ordinal < self.n_trajectory_draws:
@@ -809,3 +902,5 @@ class DGPBank:
     @property
     def n_noise_draws(self) -> int:
         return self.noise_draws.shape[0]
+
+    __hash__ = record_hash

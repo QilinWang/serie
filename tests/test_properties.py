@@ -153,8 +153,8 @@ def test_noise_draw_ordinal_matches_spawned_child_seed(
     """The draw ordinal is a spawn index; the child seed is its fingerprint.
 
     Why this matters:
-    We store both the root seed and the draw ordinal because NumPy's
-    `SeedSequence(root).spawn(n)` defines draw `i` by its spawn position.  The
+    We store both the root seed and the draw ordinal because Serie's SplitMix64
+    recipe derives draw `i` from the root and its ordinal.  The
     derived child seed is useful provenance, but it must stay synchronized with
     the ordinal.  This test rebuilds the expected spawn sequence and checks that
     every TitrationCell reports the matching ordinal/child-seed pair.

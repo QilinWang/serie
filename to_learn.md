@@ -1169,7 +1169,8 @@ serie 独立仓库早就有 CI（Part 1），现在 study 这个 monorepo 也有
 workflow 文件：
 
 ```text
-.github/workflows/ci.yml       — push / pull_request 触发，快而全
+.github/workflows/ci.yml       — 只在 Actions 页面手动触发
+.github/workflows/release-runtime.yml — 手动做候选；fern-runtime 标签才发布
 .github/workflows/nightly.yml  — 每晚定时 + 手动触发，跑需要 torch/GPU 的重测试
 ```
 
@@ -1182,10 +1183,16 @@ serie-tests — uv run pytest serie/tests（无 torch，163 个测试十几秒�
 root-tests  — 根目录 tests/ 要 import torch，只能手动触发（见下）
 ```
 
-**Trigger 是什么：** `on: push` 每次推送都跑；`on: schedule` 用 cron 表达式
-定时跑（nightly 是每天 03:17 UTC）；`workflow_dispatch` 是在 Actions 页面
-点按钮手动跑。root-tests 只在手动触发时跑，因为 uv.lock 锁定的 torch 是
-CUDA 版（wheel 约 915 MB，装完约 7 GB）——每次 push 都下载太浪费。
+**Trigger 是什么：** `on: push` 的意思是每次推送都跑。study 仓库从
+2026-10-01 起不再这样用它。`ci.yml` 和 `release-runtime.yml` 都改成
+Actions 页面上的 `workflow_dispatch`：打开 Actions，选这个 workflow，点
+Run workflow。原因是只改记录的提交也会启动十几分钟的 Gleam 和浏览器检查，
+而新的一次推送会取消还没跑完的上一次，时间和结论一起丢掉。记录可以攒几次
+再推，推送本身不会开检查。要验证时再手动开一次。`on: schedule` 仍给定时
+任务用（nightly 的 cron 是 `17 3 * * *`，即 03:17 UTC，在这台机器上是前一天
+23:17 EDT）。打上 `fern-runtime-*` 标签仍会发布
+已经留好的候选，不会重新编译。root-tests 仍然只在这次手动运行里执行，
+因为 uv.lock 锁定的 torch 是 CUDA 版（wheel 约 915 MB，装完约 7 GB）。
 
 **Cache 是什么：** GitHub 的运行机每次都是全新虚拟机，什么都要重装。
 `Swatinem/rust-cache` 缓存 cargo 的依赖编译产物（不缓存你自己 crate 的），

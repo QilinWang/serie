@@ -11,8 +11,9 @@ Reading guide:
     (mutated in place).  This is the only pipeline pattern in the file.
 
 Layout (top to bottom):
-    1. Core types     — PartitionSpec, PartitionStats, DataBundle, BundleStep, BundlePlan
-    2. Experiment     — DrawDesign, TitrationPlan (user-facing, placed early)
+    1. Core types     — PartitionSpec, PartitionStats, DataBundle, Step, Chain, BundleStep,an
+    2. Experiment     — DrawDesign, TitrationPlan, SplitTreatmentScheme,
+                       SigmaScale (user-facing, placed early)
     3. Known data     — KnownDataID, KnownMeta
     4. Load stages    — StageLoadSynthetic, StageLoadTensor, StageLoadKnownCSV
     5. Clean stages   — StageSelectColumns, StageDropBadColumns, StageImputeShortRuns, StageConvertToNumpy
@@ -23,8 +24,16 @@ Layout (top to bottom):
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field as dataclass_field
+from msgspec import Struct, field as struct_field
+from msgspec.structs import force_setattr
+from serie.records import DataclassRecord, StructRecord, record_hash
+
 import abc
+import copy
+import copyreg
 import logging
+import math
 import os
 from collections.abc import Iterator, Sequence
 from enum import StrEnum, auto
@@ -33,9 +42,8 @@ from typing import Callable, Literal
 
 import numpy as np
 import polars as pl
-from attrs import define, field, validators
 
-from .integrators import generate_from_trajectory_spec
+from .integrators import StepShockSchedule, generate_from_trajectory_spec
 from .specs import TitrationCell, ODESystem, DGPBank, TrajectorySpec
 
 logger = logging.getLogger(__name__)
@@ -54,14 +62,13 @@ def _configure_display():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def _in_unit_interval(_inst, attr, value: float) -> None:
+def _in_unit_interval(name: str, value: float) -> None:
     """REQUIRE: value in [0, 1]."""
     if not (0.0 <= value <= 1.0):
-        raise ValueError(f"{attr.name} must be in [0, 1]; got {value}")
+        raise ValueError(f"{name} must be in [0, 1]; got {value}")
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class PartitionSpec:
+class PartitionSpec(StructRecord, Struct, frozen=True, kw_only=True, eq=False, weakref=True, forbid_unknown_fields=True):
     """Train/validation/test split fractions for a time series.
     时间序列的训练/验证/测试分割比例。
 
@@ -85,14 +92,21 @@ class PartitionSpec:
                       test_start=0.9, test_end=1.0)
     """
 
-    train_start: float = field(validator=_in_unit_interval)
-    train_end: float = field(validator=_in_unit_interval)
-    val_start: float = field(validator=_in_unit_interval)
-    val_end: float = field(validator=_in_unit_interval)
-    test_start: float = field(validator=_in_unit_interval)
-    test_end: float = field(validator=_in_unit_interval)
+    train_start: float
+    train_end: float
+    val_start: float
+    val_end: float
+    test_start: float
+    test_end: float
 
-    def __attrs_post_init__(self) -> None:
+    def __post_init__(self) -> None:
+        # CHG: converters and field checks ran before the attrs post-init.
+        _in_unit_interval('train_start', self.train_start)
+        _in_unit_interval('train_end', self.train_end)
+        _in_unit_interval('val_start', self.val_start)
+        _in_unit_interval('val_end', self.val_end)
+        _in_unit_interval('test_start', self.test_start)
+        _in_unit_interval('test_end', self.test_end)
         if not (0.0 <= self.train_start < self.train_end <= 1.0):
             raise ValueError(f"Train bounds invalid: {self.train_start}-{self.train_end}")
         if not (self.train_end <= self.val_start < self.val_end <= 1.0):
@@ -172,9 +186,10 @@ class PartitionSpec:
             test_end=1.0,
         )
 
+    __hash__ = record_hash
 
-@define(slots=True, frozen=True)
-class PartitionStats:
+
+class PartitionStats(StructRecord, Struct, frozen=True, kw_only=False, eq=False, weakref=True, forbid_unknown_fields=True):
     """intent: statistical summary of a data split."""
 
     mean: np.ndarray  # [D]
@@ -218,9 +233,42 @@ class PartitionStats:
         else:
             raise ValueError(f"Unknown normalization method: {method}")
 
+    __hash__ = record_hash
 
-@define(slots=True, kw_only=True, eq=False)
-class DataBundle:
+
+class _DataBundleState:
+    """Copy and restore mutable bundle graphs without rerunning construction."""
+
+    # CHG: a plain base supplies Python's allocator for the standard pickle
+    # new-object/state protocol. A pure Struct has no __new__ for NEWOBJ.
+    __slots__ = ()
+
+    def __getstate__(self):
+        return {name: getattr(self, name) for name in self.__struct_fields__}
+
+    def __setstate__(self, state):
+        # CHG: as with attrs slots, restore declared fields only. Inherited
+        # Struct fields include the trainer extension without importing Fern.
+        for name in self.__struct_fields__:
+            if name in state:
+                setattr(self, name, state[name])
+
+    def __deepcopy__(self, memo):
+        # CHG: register the new container BEFORE traversing its fields. Unlike
+        # Struct's default reconstruction, this preserves aliases and cycles
+        # (e.g. params referring back to this bundle) instead of recursing.
+        copied = Struct.__copy__(self)
+        memo[id(self)] = copied
+        copied.__setstate__(copy.deepcopy(self.__getstate__(), memo))
+        return copied
+
+    def __reduce_ex__(self, protocol):
+        # CHG: pickle must allocate/memoize the container before its state;
+        # putting a self-reference in Struct constructor args cannot do that.
+        return copyreg.__newobj__, (type(self),), self.__getstate__()
+
+
+class DataBundle(_DataBundleState, Struct, kw_only=True, eq=False, weakref=True):
     """Mutable pipeline accumulator for the Python data path."""
 
     # === Provenance (set by load stage) ===
@@ -228,12 +276,31 @@ class DataBundle:
     trajectory_draw_ordinal: int | None = None
     params: object | None = None  # TrajectorySpec for synthetic
     known_meta: KnownMeta | None = None  # For known datasets
+    calendar_features: np.ndarray | None = None  # [T, 2] observed time-of-day and weekday fractions
+    # CHG: canonical precomputed calendar provenance; consumers may verify
+    # encoding from the original datetimes without fitting another clock.
+    calendar_source_datetimes: np.ndarray | None = None
     df: pl.DataFrame | None = None  # temp container for known data
 
     # === Data (set by load/clean stages) ===
     # The current full [T, D] series array. It starts as the clean source and
     # noise stages replace it with the noisy observed series.
     series: np.ndarray | None = None  # [T, D] contiguous float32
+    # Optional transition controls. `actions[t]` drives `series[t]` to
+    # `series[t+1]`; it remains separate from the observed state manifold.
+    actions: np.ndarray | None = None  # [T-1, A] contiguous float32
+    # Complete future-only episodes on the batch axis. `episode_states` is
+    # [E, T, D] and `episode_actions` is [E, T-1, A]. Present only for banks
+    # that declare episode_axis=trajectory_draw; the long-series window path
+    # must not see these.
+    # CHG 2026-09-02: a bank may also be read as sliding windows cut inside
+    # each episode, so the episodes need not be future-only. `episode_lengths`
+    # is how many of the T states each episode really recorded when the bank
+    # pads shorter episodes out to a common T; None means every episode fills
+    # T. The window cutter is the trainer's, not SERIE's.
+    episode_states: np.ndarray | None = None
+    episode_actions: np.ndarray | None = None
+    episode_lengths: np.ndarray | None = None  # [E] int64
     channels: int | None = None
     feature_names: list[str] | None = None
 
@@ -245,6 +312,7 @@ class DataBundle:
     test_partition_stats: PartitionStats | None = None
 
     injected_sigma: float | None = None
+    split_treatment_scheme: SplitTreatmentScheme | None = None
 
     # === Pipeline operator ===
     # Pipe operator: ``db | stage`` calls stage.apply(db) and returns the result.
@@ -259,47 +327,132 @@ class DataBundle:
         return self.train_partition_stats.std
 
 
-@define(frozen=True, slots=True)
-class BundleStep:
-    """Pipeable `DataBundle -> DataBundle` transform."""
+class Step(abc.ABC):
+    """One transform of one subject, pipeable: `apply(subject) -> subject`.
+
+    `a | b` is a `Chain`; `step | subject` applies the step to the subject.
+    The bundle stages, the cell stages and the trainer's steps are all this
+    one shape (CHG 2026-09-03: it was written four times, once per chain).
+    """
 
     @abc.abstractmethod
-    def apply(self, db: "DataBundle") -> "DataBundle":
+    def apply(self, subject):
         raise NotImplementedError
 
-    def __call__(self, db: "DataBundle") -> "DataBundle":
-        return self.apply(db)
+    def __call__(self, subject):
+        return self.apply(subject)
 
-    def __or__(self, right):  # REQUIRE: right is BundleStep or DataBundle
-        if isinstance(right, DataBundle):  # op | db
-            return self.apply(right)
-        if isinstance(right, BundleStep):  # op1 | op2
-            return BundlePlan(parts=(self, right))
-        raise TypeError(f"Unsupported pipe: {type(self)} | {type(right)}")
+    def __or__(self, right):
+        if isinstance(right, Step):  # step | step
+            return Chain(parts=(self, right))
+        return self.apply(right)  # step | subject
 
     @property
     def name(self) -> str:
         return self.__class__.__name__
 
 
-@define(frozen=True, slots=True)
-class BundlePlan(BundleStep):
-    """Deterministic sequence of `BundleStep`s."""
+@dataclass(frozen=True, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class Chain(DataclassRecord, Step):
+    """A flat sequence of steps, applied in order; nested chains flatten on construction."""
 
-    parts: tuple[BundleStep, ...]  # [K]
+    parts: tuple[Step, ...]
 
+    def __post_init__(self) -> None:
+        # CHG: converters and field checks ran before the attrs post-init.
+        object.__setattr__(self, 'parts', tuple(self.parts))
+        flat: list[Step] = []
+        for part in self.parts:
+            flat.extend(part.parts if isinstance(part, Chain) else (part,))
+        object.__setattr__(self, "parts", tuple(flat))
+
+    def apply(self, subject):
+        for step in self.parts:
+            subject = step(subject)
+        return subject
+
+    def __or__(self, right):
+        if isinstance(right, Step):
+            return Chain(parts=(*self.parts, right))
+        return self.apply(right)
+
+    def summary(self, depth: int = 0) -> str:
+        """The chain as an indented tree, one step per line."""
+        lines = [f"{'  ' * depth}* {self.name}:"]
+        for part in self.parts:
+            lines.append(
+                part.summary(depth + 1)
+                if isinstance(part, Chain)
+                else f"{'  ' * (depth + 1)}- {part.name}"
+            )
+        return "\n".join(lines) + "\n"
+
+    __hash__ = record_hash
+
+    __setstate__ = DataclassRecord.__setstate__
+
+
+class BundleStep(Step):
+    """A `Step` whose subject is a `DataBundle`."""
+
+    @abc.abstractmethod
     def apply(self, db: "DataBundle") -> "DataBundle":
-        for op in self.parts:
-            db = op(db)
-        return db
-
-    def __or__(self, right: BundleStep) -> "BundlePlan":
-        return BundlePlan(parts=(*self.parts, right))
+        raise NotImplementedError
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 2. Experiment design (user-facing — placed early for discoverability)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class SplitTreatmentScheme(StrEnum):
+    """Which chronological splits receive the titrated observation noise.
+
+    ``NOISE_MATCHED_RETRAINING`` is Fern's historical titration: the same
+    frozen noise draw and dose are applied to train, validation, and test.
+    Every dose therefore defines a separately noise-matched training problem.
+
+    ``CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION`` is the clean-selection-regret
+    (CSR) data contract: train is clean, validation/model selection is clean,
+    and only the test interval receives the dose.  Exact CSR also freezes the
+    fitted model and any calibrator across doses.  Recipes that declare
+    ``checkpoint_reuse_policy=clean_validation_best`` implement that second
+    half explicitly: dose zero trains and saves the validation-best model;
+    every positive dose names that clean source run in hashed protocol
+    identity, loads its checkpoint, and evaluates only the noisy test split.
+    The regret itself is still an analysis across candidate models: select one
+    candidate once using dose-zero validation performance, then compare that
+    fixed choice with the best candidate at each noisy test dose.  This enum
+    controls split treatment; the separate checkpoint policy controls the
+    fit-once/evaluate-many execution dependency.
+
+    ``NOISE_TRAIN_NOISE_SELECT_CLEAN_TEST`` is the complementary return-to-clean
+    view: train and validation receive the registered dose, while test remains
+    clean.  It reuses the validation-best checkpoint fitted by the matching
+    noise-matched cell at the same dose and bank.  Comparing this score with
+    the noise-matched score separates adaptation to the noisy measurement
+    world from retention of the underlying clean dynamics.
+
+    Neither scheme needs gradient descent merely to inject noise or compute a
+    score.  Gradient-based fitting happens only because a chosen forecasting
+    model's trainer uses it.
+    """
+
+    NOISE_MATCHED_RETRAINING = auto()
+    CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION = auto()
+    NOISE_TRAIN_NOISE_SELECT_CLEAN_TEST = auto()
+
+
+class SigmaScale(StrEnum):
+    """How one shared f32 dose scales the frozen unit-noise draw.
+
+    ``UNIT`` applies the dose directly. ``TRAIN_STD`` multiplies it by the
+    clean training split's per-channel standard deviation before injection.
+    This belongs to Serie's data semantics, not to a Fern worker request.
+    """
+
+    UNIT = "unit"
+    TRAIN_STD = "train_std"
 
 
 class DrawDesign(StrEnum):
@@ -327,8 +480,7 @@ class DrawDesign(StrEnum):
     CROSS_PRODUCT = auto()
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class TitrationPlan:
+class TitrationPlan(StructRecord, Struct, frozen=True, kw_only=True, eq=False, weakref=True, forbid_unknown_fields=True):
     """Experiment grid for a noise-dose sweep: which noise levels to test and
     how many independent draws to use.
     噪声剂量扫描的实验网格：测试哪些噪声水平，使用多少独立抽取。
@@ -349,19 +501,20 @@ class TitrationPlan:
         ...     )
     """
 
-    noise_levels: tuple[float, ...] = field(
-        default=(1e-3, 1e-2, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0),
-        converter=tuple,
-    )
-    n_trajectory_draws: int = field(default=3, validator=validators.ge(1))
-    n_noise_draws: int = field(default=3, validator=validators.ge(1))
+    noise_levels: tuple[float, ...] = (0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0)
+    n_trajectory_draws: int = 3
+    n_noise_draws: int = 3
     noise_seed_base: int = 1000
-    draw_design: DrawDesign = field(
-        default=DrawDesign.AUTO,
-        converter=DrawDesign,
-    )
+    draw_design: DrawDesign = DrawDesign.AUTO
 
-    def __attrs_post_init__(self) -> None:
+    def __post_init__(self) -> None:
+        # CHG: converters and field checks ran before the attrs post-init.
+        force_setattr(self, 'noise_levels', tuple(self.noise_levels))
+        force_setattr(self, 'draw_design', DrawDesign(self.draw_design))
+        if not self.n_trajectory_draws >= 1:
+            raise ValueError(f"'n_trajectory_draws' must be >= 1: {self.n_trajectory_draws}")
+        if not self.n_noise_draws >= 1:
+            raise ValueError(f"'n_noise_draws' must be >= 1: {self.n_noise_draws}")
         if len(self.noise_levels) == 0:
             raise ValueError("TitrationPlan.noise_levels cannot be empty")
 
@@ -504,6 +657,8 @@ class TitrationPlan:
     def cells(self, bank: "DGPBank") -> tuple[TitrationCell, ...]:
         return tuple(self.iter_cells(bank))
 
+    __hash__ = record_hash
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 3. Known data
@@ -521,6 +676,8 @@ class KnownDataID(StrEnum):
     HUGADB_ACCEL_EMG = auto()
     HUGADB_WALK_BICYCLING_SWITCH = auto()
     HUGADB_WALK_BICYCLING_SWITCH_OOD80 = auto()
+    HUGADB_WALK_RUN_NATURAL = auto()
+    HUGADB_WALK_ONLY_NATURAL = auto()
 
 
 def known_data_root() -> Path:
@@ -548,6 +705,8 @@ _KNOWN_SOURCE_URLS: dict[KnownDataID, str] = {
     KnownDataID.HUGADB_ACCEL_EMG: "https://github.com/romanchereshnev/HuGaDB",
     KnownDataID.HUGADB_WALK_BICYCLING_SWITCH: "https://github.com/romanchereshnev/HuGaDB",
     KnownDataID.HUGADB_WALK_BICYCLING_SWITCH_OOD80: "https://github.com/romanchereshnev/HuGaDB",
+    KnownDataID.HUGADB_WALK_RUN_NATURAL: "https://github.com/romanchereshnev/HuGaDB",
+    KnownDataID.HUGADB_WALK_ONLY_NATURAL: "https://github.com/romanchereshnev/HuGaDB",
 }
 
 
@@ -568,8 +727,7 @@ def _known_data_missing_message(meta: "KnownMeta", path: Path) -> str:
     return "\n".join(details)
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class KnownMeta:
+class KnownMeta(StructRecord, Struct, frozen=True, kw_only=True, eq=False, weakref=True, forbid_unknown_fields=True):
     """Metadata and cleaning rules for one known dataset.
 
     This is the dataset-side contract for known tabular data:
@@ -588,10 +746,8 @@ class KnownMeta:
     date_column: str | None = None
 
     # Fields with defaults
-    universal_sentinels: list[float] = field(converter=list)
-    sentinels: dict[str, list[float]] = field(
-        factory=dict
-    )  # { column_name: [value1, value2, ...] }
+    universal_sentinels: list[float]
+    sentinels: dict[str, list[float]] = struct_field(default_factory=dict)  # { column_name: [value1, value2, ...] }
     impute_method: Literal["nearest", "linear"] = "linear"
 
     @property
@@ -618,6 +774,8 @@ class KnownMeta:
             KnownDataID.HUGADB_ACCEL_EMG: cls.hugadb_accel_emg,
             KnownDataID.HUGADB_WALK_BICYCLING_SWITCH: cls.hugadb_walk_bicycling_switch,
             KnownDataID.HUGADB_WALK_BICYCLING_SWITCH_OOD80: cls.hugadb_walk_bicycling_switch_ood80,
+            KnownDataID.HUGADB_WALK_RUN_NATURAL: cls.hugadb_walk_run_natural,
+            KnownDataID.HUGADB_WALK_ONLY_NATURAL: cls.hugadb_walk_only_natural,
         }
         return factory[known_id]()
 
@@ -736,6 +894,36 @@ class KnownMeta:
         )
 
     @classmethod
+    def hugadb_walk_run_natural(cls) -> "KnownMeta":
+        """One continuous single-subject recording with a performed
+        walk -> run -> walk activity change (transition at 36.4% of the
+        record). Unlike the bicycling switch asset this is not a splice, so
+        the acceleration and deceleration around each change are in the
+        signal; see build_hugadb_subject14_worlds.py."""
+        return cls(
+            dataset_id=KnownDataID.HUGADB_WALK_RUN_NATURAL,
+            path=_known_asset_path("hugadb", "hugadb_walk_run_natural.ipc"),
+            sampling_seconds=1,
+            universal_sentinels=[],
+            date_column=None,
+        )
+
+    @classmethod
+    def hugadb_walk_only_natural(cls) -> "KnownMeta":
+        """The stationary control for hugadb_walk_run_natural: the SAME
+        subject, sensors, and session, walking on every row. Comparing the
+        changed world against this one isolates the activity change;
+        comparing it against hugadb_accel_emg does not, because that asset is
+        a different subject."""
+        return cls(
+            dataset_id=KnownDataID.HUGADB_WALK_ONLY_NATURAL,
+            path=_known_asset_path("hugadb", "hugadb_walk_only_natural.ipc"),
+            sampling_seconds=1,
+            universal_sentinels=[],
+            date_column=None,
+        )
+
+    @classmethod
     def hugadb_walk_bicycling_switch_ood80(cls) -> "KnownMeta":
         return cls(
             dataset_id=KnownDataID.HUGADB_WALK_BICYCLING_SWITCH_OOD80,
@@ -745,18 +933,28 @@ class KnownMeta:
             date_column=None,
         )
 
+    def __post_init__(self):
+        # CHG: preserve converters/checks on direct Python construction.
+        force_setattr(self, 'universal_sentinels', list(self.universal_sentinels))
+
+    __hash__ = record_hash
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 3. Load stages
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageLoadSynthetic(BundleStep):
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageLoadSynthetic(DataclassRecord, BundleStep):
     """Load one synthetic trajectory from a `TrajectorySpec` into a `DataBundle`."""
+
+    # CHG: an explicit step schedule travels with this stage into the generator
+    # and the bundle's source description; the historical no-schedule path stays intact.
 
     trajectory_spec: TrajectorySpec
     seed: int = 0
+    step_schedule: StepShockSchedule | None = None
 
     def apply(self, db: "DataBundle") -> "DataBundle":
         logger.debug("loading synthetic source: %s", self.trajectory_spec.system)
@@ -764,19 +962,24 @@ class StageLoadSynthetic(BundleStep):
             self.trajectory_spec,
             seed=self.seed,
             dtype=np.float32,
+            step_schedule=self.step_schedule,
         ).astype(np.float32, copy=False)
         feature_names = [f"f{i}" for i in range(data.shape[1])]
         db.dataset_id = self.trajectory_spec.system
-        db.params = self.trajectory_spec
+        db.params = self.trajectory_spec if self.step_schedule is None else self
         db.feature_names = feature_names
         db.channels = data.shape[1]
         db.series = np.ascontiguousarray(data, dtype=np.float32)
 
         return db
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageLoadTensor(BundleStep):
+    __setstate__ = DataclassRecord.__setstate__
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageLoadTensor(DataclassRecord, BundleStep):
     """Load a precomputed trajectory array into a `DataBundle`."""
 
     data: np.ndarray  # [T, D] contiguous float32
@@ -790,9 +993,59 @@ class StageLoadTensor(BundleStep):
         db.feature_names = list(self.feature_names)
         return db
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageLoadKnownCSV(BundleStep):
+    __setstate__ = DataclassRecord.__setstate__
+
+
+def calendar_features_from_datetimes(dates: np.ndarray) -> np.ndarray:
+    """Convert real timestamps [T] to [T,2] day and Monday-based week fractions."""
+    times = np.asarray(dates).astype("datetime64[s]")
+    if times.ndim != 1 or np.isnat(times).any():
+        raise ValueError("calendar input requires a one-dimensional array of real timestamps")
+    days = times.astype("datetime64[D]").astype(np.int64)
+    seconds = (times - times.astype("datetime64[D]")).astype("timedelta64[s]").astype(np.int64)
+    return np.ascontiguousarray(np.stack((seconds / 86400, ((days + 3) % 7) / 7), axis=1), dtype=np.float32)
+
+
+def known_calendar_features(db: DataBundle) -> np.ndarray:
+    """Read observed calendar time as [T, 2] fractions: day and week.
+
+    Columns are [seconds since midnight / 86400, (Monday-based weekday) / 7].
+    The same numeric-null row filter as StageLoadKnownCSV keeps dates aligned
+    with the cleaned series. A missing real date column is refused.
+    """
+    meta = db.known_meta
+    if meta is None or meta.date_column is None or db.series is None:
+        raise ValueError("calendar features require a loaded known series with a declared date column")
+    path = Path(meta.path).expanduser()
+    if not path.exists() and path.with_suffix(".csv").exists():
+        path = path.with_suffix(".csv")
+    if path.suffix.lower() == ".ipc":
+        frame = pl.read_ipc(path)
+    else:
+        if not path.exists():
+            raise FileNotFoundError(f"calendar features require the original dated CSV: {path}")
+        frame = pl.read_csv(path)
+        if meta.date_column in frame.columns:
+            numeric_columns = [name for name in frame.columns if name != meta.date_column]
+            if not numeric_columns:
+                raise ValueError("calendar source has no numeric observation columns")
+            frame = frame.filter(pl.all_horizontal(pl.col(numeric_columns).is_not_null()))
+    if meta.date_column not in frame.columns:
+        raise ValueError(f"calendar source {path} has no declared date column {meta.date_column!r}")
+    dates = frame.select(pl.col(meta.date_column).cast(pl.String).str.to_datetime(strict=True).alias("observed_at"))
+    if dates["observed_at"].null_count() != 0:
+        raise ValueError(f"calendar source {path} has null dates in retained observations")
+    if len(dates) != len(db.series):
+        raise ValueError(
+            f"calendar and cleaned series have different lengths: {len(dates)} dates, {len(db.series)} observations"
+        )
+    return calendar_features_from_datetimes(dates["observed_at"].to_numpy())
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageLoadKnownCSV(DataclassRecord, BundleStep):
     """Load a known CSV or IPC dataset into a `DataBundle`."""
 
     dataset_id: str | KnownDataID
@@ -871,14 +1124,18 @@ class StageLoadKnownCSV(BundleStep):
 
         return db
 
+    __hash__ = record_hash
+
+    __setstate__ = DataclassRecord.__setstate__
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 4. Clean stages
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageSelectColumns(BundleStep):
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageSelectColumns(DataclassRecord, BundleStep):
     """Filter DataFrame to selected columns by name or index."""
 
     keep_cols: Sequence[str] | None = None
@@ -910,12 +1167,16 @@ class StageSelectColumns(BundleStep):
         logger.debug("selected %s columns: %s", db.channels, db.feature_names)
         return db
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageDropBadColumns(BundleStep):
+    __setstate__ = DataclassRecord.__setstate__
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageDropBadColumns(DataclassRecord, BundleStep):
     """Drop columns with excessive sentinel fraction or long sentinel runs."""
 
-    exempt_cols: list[str] = field(factory=list)
+    exempt_cols: list[str] = dataclass_field(default_factory=list)
     drop_col_threshold: float = 0.2
     drop_col_longrun_hours: int = 24 * 7
     value_tol: float = 1e-6
@@ -966,13 +1227,17 @@ class StageDropBadColumns(BundleStep):
         db.channels = len(dropped_df.columns)
         return db
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageImputeShortRuns(BundleStep):
+    __setstate__ = DataclassRecord.__setstate__
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageImputeShortRuns(DataclassRecord, BundleStep):
     """Detect sentinel runs and interpolate short bad segments."""
 
     known_meta: KnownMeta
-    exempt_cols: list[str] = field(factory=list)
+    exempt_cols: list[str] = dataclass_field(default_factory=list)
     value_tol: float = 1e-6
 
     def apply(self, db: "DataBundle") -> "DataBundle":
@@ -1005,6 +1270,10 @@ class StageImputeShortRuns(BundleStep):
         db.channels = len(imputed_df.columns)
 
         return db
+
+    __hash__ = record_hash
+
+    __setstate__ = DataclassRecord.__setstate__
 
 
 def _detect_sentinel_runs(
@@ -1043,8 +1312,8 @@ def _detect_sentinel_runs(
     return cond, runlen
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageConvertToNumpy(BundleStep):
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageConvertToNumpy(DataclassRecord, BundleStep):
     """Finalize cleaning by converting a Polars frame to a contiguous Float32 array."""
 
     def apply(self, db: "DataBundle") -> "DataBundle":
@@ -1059,14 +1328,18 @@ class StageConvertToNumpy(BundleStep):
         db.df = None  # Free the Polars DataFrame to save RAM
         return db
 
+    __hash__ = record_hash
+
+    __setstate__ = DataclassRecord.__setstate__
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 5. Split stages
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageSplitByFraction(BundleStep):
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageSplitByFraction(DataclassRecord, BundleStep):
     """Partition data into train/val/test by fraction boundaries."""
 
     partition_spec: PartitionSpec
@@ -1086,9 +1359,13 @@ class StageSplitByFraction(BundleStep):
 
         return db
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageComputeSplitStats(BundleStep):
+    __setstate__ = DataclassRecord.__setstate__
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageComputeSplitStats(DataclassRecord, BundleStep):
     """Compute per-split statistics (mean, std, quantiles) for normalization."""
 
     ddof: int = 1
@@ -1137,20 +1414,113 @@ class StageComputeSplitStats(BundleStep):
         db.test_partition_stats = self._get_stats(X, db.indices[4], db.indices[5])  # type: ignore
         return db
 
+    __hash__ = record_hash
+
+    __setstate__ = DataclassRecord.__setstate__
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 6. Noise stages
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageInjectNoise(BundleStep):
-    """Inject noise: `series += noise_level * noise_draw`."""
+def _noise_row_slices(
+    db: DataBundle, scheme: SplitTreatmentScheme, noise_on: NoisedSplits | None = None
+) -> tuple[slice, ...]:
+    """Resolve the only rows a noise stage is allowed to mutate: the named splits, else the scheme's."""
+    if noise_on is not None:
+        return noise_on.row_slices(db)
+    if scheme is SplitTreatmentScheme.NOISE_MATCHED_RETRAINING:
+        return (slice(None),)
+    if scheme is SplitTreatmentScheme.CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION:
+        if db.indices is None:
+            raise RuntimeError(
+                "clean_train_clean_select_test_titration requires split indices; "
+                "run StageSplitByFraction before the noise stage"
+            )
+        test_start, test_end = db.indices[4], db.indices[5]
+        return (slice(test_start, test_end),)
+    if scheme is SplitTreatmentScheme.NOISE_TRAIN_NOISE_SELECT_CLEAN_TEST:
+        if db.indices is None:
+            raise RuntimeError(
+                "noise_train_noise_select_clean_test requires split indices; "
+                "run StageSplitByFraction before the noise stage"
+            )
+        train_start, train_end, val_start, val_end = db.indices[:4]
+        return (slice(train_start, train_end), slice(val_start, val_end))
+    raise ValueError(f"unsupported split treatment scheme: {scheme!r}")
+
+
+class NoisedSplits(StructRecord, Struct, frozen=True, kw_only=False, eq=False, weakref=True, forbid_unknown_fields=True):
+    """Which chronological splits receive the observation noise, named outright.
+
+    The three scheme names above are three of the seven non-empty subsets of
+    {train, val, test}; a card names the subset (owner 2026-09-04: "the card
+    always says who has noise"), and each scheme is one of them.
+    """
+
+    train: bool
+    val: bool
+    test: bool
+
+    NAMES = ("train", "val", "test")
+
+    @classmethod
+    def of(cls, names) -> "NoisedSplits":
+        chosen = tuple(str(n) for n in names)
+        unknown = [n for n in chosen if n not in cls.NAMES]
+        if unknown or not chosen:
+            raise ValueError(
+                f"noise_on names a non-empty subset of {cls.NAMES}; got {list(chosen)!r}"
+            )
+        return cls(train="train" in chosen, val="val" in chosen, test="test" in chosen)
+
+    @classmethod
+    def of_scheme(cls, scheme: "SplitTreatmentScheme") -> "NoisedSplits":
+        scheme = SplitTreatmentScheme(scheme)
+        if scheme is SplitTreatmentScheme.NOISE_MATCHED_RETRAINING:
+            return cls(train=True, val=True, test=True)
+        if scheme is SplitTreatmentScheme.CLEAN_TRAIN_CLEAN_SELECT_TEST_TITRATION:
+            return cls(train=False, val=False, test=True)
+        if scheme is SplitTreatmentScheme.NOISE_TRAIN_NOISE_SELECT_CLEAN_TEST:
+            return cls(train=True, val=True, test=False)
+        raise ValueError(f"unsupported split treatment scheme: {scheme!r}")
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(n for n, on in zip(self.NAMES, (self.train, self.val, self.test)) if on)
+
+    def row_slices(self, db: "DataBundle") -> tuple[slice, ...]:
+        if self.train and self.val and self.test:
+            return (slice(None),)
+        if db.indices is None:
+            raise RuntimeError(
+                f"noise_on={list(self.names())} requires split indices; run StageSplitByFraction before the noise stage"
+            )
+        bounds = {"train": db.indices[0:2], "val": db.indices[2:4], "test": db.indices[4:6]}
+        return tuple(slice(*bounds[name]) for name in self.names())
+
+    __hash__ = record_hash
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageInjectNoise(DataclassRecord, BundleStep):
+    """Inject unit-scaled observation noise into the scheme-selected rows.
+
+    The historical scheme modifies the full ``[T, D]`` series.  The CSR
+    scheme modifies only ``indices[4]:indices[5]`` (the test interval), so the
+    training tensor, validation tensor, early stopping, and clean model
+    selection remain uncontaminated by the test dose.
+    """
 
     noise_level: float
     noise_draw: np.ndarray
+    split_treatment_scheme: SplitTreatmentScheme = SplitTreatmentScheme.NOISE_MATCHED_RETRAINING
+    # CHG 2026-09-04: the splits may be named outright; when given they decide the rows, and the
+    # scheme is only recorded on the bundle for readers of the old word.
+    noise_on: NoisedSplits | None = None
 
     def apply(self, db: DataBundle) -> DataBundle:
+        db.split_treatment_scheme = self.split_treatment_scheme
         if self.noise_level == 0.0:
             db.injected_sigma = 0.0
             return db
@@ -1162,25 +1532,50 @@ class StageInjectNoise(BundleStep):
             f"noise_draw {self.noise_draw.shape} != data ({T}, {D})"
         )
 
-        noise = self.noise_level * self.noise_draw
-        db.series = np.ascontiguousarray(db.series + noise, dtype=np.float32)
+        observed = db.series.copy()
+        noise_norm_squared = 0.0
+        for row_slice in _noise_row_slices(db, self.split_treatment_scheme, self.noise_on):
+            noise = self.noise_level * self.noise_draw[row_slice]
+            observed[row_slice] += noise
+            noise_norm_squared += float(np.square(noise).sum())
+        db.series = np.ascontiguousarray(observed, dtype=np.float32)
         db.injected_sigma = self.noise_level
         logger.debug(
             "injected noise: level=%.2e norm=%.2f",
             self.noise_level,
-            np.linalg.norm(noise),
+            math.sqrt(noise_norm_squared),
         )
         return db
 
+    def __post_init__(self):
+        # CHG: preserve converters/checks on direct Python construction.
+        object.__setattr__(self, 'split_treatment_scheme', SplitTreatmentScheme(self.split_treatment_scheme))
 
-@define(frozen=True, slots=True, kw_only=True)
-class StageInjectTrainScaledNoise(BundleStep):
-    """Inject noise scaled by train-set channel stds."""
+    __hash__ = record_hash
+
+    __setstate__ = DataclassRecord.__setstate__
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StageInjectTrainScaledNoise(DataclassRecord, BundleStep):
+    """Inject noise scaled by clean-train channel standard deviations.
+
+    Dose ``d`` means channelwise standard deviation ``d * train_std[j]``.
+    Under the CSR scheme the scale is still estimated from the untouched clean
+    training interval, and only test rows receive the resulting noise.  This
+    is a deterministic data transformation, not a fitted loss, so it requires
+    no gradient descent.
+    """
 
     noise_level: float
     noise_draw: np.ndarray
+    split_treatment_scheme: SplitTreatmentScheme = SplitTreatmentScheme.NOISE_MATCHED_RETRAINING
+    # CHG 2026-09-04: the splits may be named outright; when given they decide the rows, and the
+    # scheme is only recorded on the bundle for readers of the old word.
+    noise_on: NoisedSplits | None = None
 
     def apply(self, db: DataBundle) -> DataBundle:
+        db.split_treatment_scheme = self.split_treatment_scheme
         if self.noise_level == 0.0:
             db.injected_sigma = 0.0
             return db
@@ -1193,15 +1588,28 @@ class StageInjectTrainScaledNoise(BundleStep):
         )
 
         channel_scale = np.maximum(db.train_std.astype(np.float32, copy=False), 1e-8)
-        noise = self.noise_level * (channel_scale[None, :] * self.noise_draw)
-        db.series = np.ascontiguousarray(db.series + noise, dtype=np.float32)
+        observed = db.series.copy()
+        noise_norm_squared = 0.0
+        for row_slice in _noise_row_slices(db, self.split_treatment_scheme, self.noise_on):
+            noise = self.noise_level * (channel_scale[None, :] * self.noise_draw[row_slice])
+            observed[row_slice] += noise
+            noise_norm_squared += float(np.square(noise).sum())
+        db.series = np.ascontiguousarray(observed, dtype=np.float32)
         db.injected_sigma = self.noise_level
         logger.debug(
             "injected train-std-scaled noise: level=%.2e norm=%.2f",
             self.noise_level,
-            np.linalg.norm(noise),
+            math.sqrt(noise_norm_squared),
         )
         return db
+
+    def __post_init__(self):
+        # CHG: preserve converters/checks on direct Python construction.
+        object.__setattr__(self, 'split_treatment_scheme', SplitTreatmentScheme(self.split_treatment_scheme))
+
+    __hash__ = record_hash
+
+    __setstate__ = DataclassRecord.__setstate__
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1211,8 +1619,8 @@ class StageInjectTrainScaledNoise(BundleStep):
 from .diagnostics import print_diagnostics  # noqa: E402
 
 
-@define(frozen=True, slots=True, kw_only=True)
-class StagePrintDiagnostics(BundleStep):
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False, weakref_slot=True)
+class StagePrintDiagnostics(DataclassRecord, BundleStep):
     """Render split diagnostics after partitioning and stats are ready."""
 
     col: int = 10
@@ -1234,3 +1642,7 @@ class StagePrintDiagnostics(BundleStep):
         )
         logger.info("data partitioned successfully")
         return db
+
+    __hash__ = record_hash
+
+    __setstate__ = DataclassRecord.__setstate__

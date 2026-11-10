@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "bake": "UV_CACHE_DIR=/tmp/uv-cache uv run --no-project --with-editable .. python bake_demo_data.py",
-    "bake:rs": "cargo run -q --manifest-path ../../serie-rs/Cargo.toml -- demo shapes --n-points 2000 --n-draws 12 --out public/attractor_data.json",
     "typecheck": "tsc -b",
     "dev": "vite",
     "build": "tsc -b && vite build",

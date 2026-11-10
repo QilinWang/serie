@@ -20,11 +20,12 @@ tested in test_titration_edges.py and test_public_contracts.py.
 
 from __future__ import annotations
 
+from msgspec.structs import replace
+
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
-from attrs import evolve
 
 from serie import (
     DrawDesign,
@@ -78,7 +79,7 @@ def test_public_api_smoke_flow(capsys) -> None:
         assert source_split.train_values.ndim == 2
         _line("source", source=source_bank.name, clean=source_bank.clean.shape)
 
-    shifted = evolve(TrajectorySpec.lorenz_param_shock(), steps=199)
+    shifted = replace(TrajectorySpec.lorenz_param_shock(), steps=199)
     shifted_bank = build_dgp_bank(shifted, seed=42)
     clean = inject_noise(shifted_bank, sigma=0.0)
     noisy = inject_noise(shifted_bank, sigma=0.25)

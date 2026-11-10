@@ -18,7 +18,8 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "attrs>=24.0",
+    "pillow>=10.0",
+    "msgspec>=0.21.0",
     "cappa>=0.31.0",
     "matplotlib>=3.8",
     "numpy>=2.0",
@@ -34,6 +35,9 @@ Repository = "https://github.com/QilinWang/serie"
 serie = "serie.cli:main"
 
 [project.optional-dependencies]
+split = [
+    "scikit-learn>=1.6",
+]
 diagnostics = [
     "rich>=13.0",
 ]
@@ -48,6 +52,7 @@ dev = [
     "pytest-cov>=5.0",
     "rich>=13.0",
     "ruff>=0.8",
+    "scikit-learn>=1.6",
 ]
 
 [build-system]
@@ -77,6 +82,12 @@ serie = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "requires_torch: needs PyTorch autodiff",
+    "requires_simulator: needs Gymnasium or MuJoCo physics dependencies",
+    "requires_oracle_bank: needs committed oracle artifacts and their source history",
+    "requires_julia: needs the instantiated Julia SciML project",
+]
 
 [tool.coverage.run]
 source = ["."]

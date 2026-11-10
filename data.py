@@ -11,15 +11,18 @@ load_data(source)   — dispatch: TrajectorySpec → synthetic, KnownMeta → re
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field as dataclass_field
+from msgspec import Struct
+from serie.records import DataclassRecord, StructRecord, record_hash
+
 from enum import StrEnum, auto
 from types import MappingProxyType
 from typing import Mapping, TYPE_CHECKING
 
 import numpy as np
-from attrs import define, field
 
 if TYPE_CHECKING:
-    from .pipeline import DataBundle, KnownMeta, PartitionSpec, PartitionStats
+    from .pipeline import KnownMeta, PartitionSpec, PartitionStats
     from .specs import TitrationCell, TrajectorySpec
 
 
@@ -38,8 +41,36 @@ class KnownLoadMode(StrEnum):
     RAW = auto()
 
 
-@define(frozen=True, slots=True)
-class KnownCleanConfig:
+_UINT64_MASK = (1 << 64) - 1
+_UINT32_MASK = (1 << 32) - 1
+
+
+def draw_seed(seed_base: int, draw_ordinal: int) -> int:
+    """Derive one uint32-compatible child seed with Rust SplitMix64 arithmetic.
+
+    The mask follows every Rust ``u64`` multiplication rather than relying on
+    Python's unbounded integers.  The returned value is an identity input for a
+    trajectory or observation-noise draw, so this pure function has no random
+    generator or mutable state behind it.
+    """
+    if draw_ordinal < 0:
+        raise ValueError(f"draw_ordinal must be >= 0, got {draw_ordinal}")
+    x = (int(seed_base) & _UINT64_MASK) ^ (
+        (0x9E3779B97F4A7C15 * (int(draw_ordinal) + 1)) & _UINT64_MASK
+    )
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
+    return int((x ^ (x >> 31)) & _UINT32_MASK)
+
+
+def spawn_draw_seeds(seed_base: int, n_draws: int) -> tuple[int, ...]:
+    """Return the complete, ordered SplitMix64 child-seed recipe."""
+    if n_draws < 1:
+        raise ValueError(f"n_draws must be >= 1, got {n_draws}")
+    return tuple(draw_seed(seed_base, draw_ordinal) for draw_ordinal in range(n_draws))
+
+
+class KnownCleanConfig(StructRecord, Struct, frozen=True, kw_only=False, eq=False, weakref=True, forbid_unknown_fields=True):
     """Public cleaning config for known CSV datasets."""
 
     mode: KnownLoadMode = KnownLoadMode.CLEAN
@@ -52,9 +83,11 @@ class KnownCleanConfig:
     drop_col_threshold: float = 0.2
     drop_col_longrun_hours: int = 24 * 7
 
+    __hash__ = record_hash
 
-@define(frozen=True, slots=True, eq=False)
-class TimeSeriesData:
+
+@dataclass(frozen=True, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class TimeSeriesData(DataclassRecord):
     """One clean time series array with provenance metadata.
     一条带有来源元数据的干净时间序列数组。
 
@@ -68,9 +101,9 @@ class TimeSeriesData:
     feature_names: tuple[str, ...]
     source_id: str
     source_kind: SourceKind
-    metadata: Mapping[str, object] = field(factory=dict)
+    metadata: Mapping[str, object] = dataclass_field(default_factory=dict)
 
-    def __attrs_post_init__(self) -> None:
+    def __post_init__(self) -> None:
         values = np.array(self.values, dtype=np.float32, copy=True, order="C")
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "feature_names", tuple(self.feature_names))
@@ -81,20 +114,15 @@ class TimeSeriesData:
     def channels(self) -> int:
         return self.values.shape[1]
 
-    def to_bundle(self) -> "DataBundle":
-        """Internal bridge back to the trainer-side DataBundle."""
-        from .pipeline import DataBundle
+    __eq__ = object.__eq__
+    __ne__ = object.__ne__
+    __hash__ = object.__hash__
 
-        db = DataBundle()
-        db.series = self.values
-        db.channels = self.channels
-        db.feature_names = list(self.feature_names)
-        db.dataset_id = self.source_id
-        return db
+    __setstate__ = DataclassRecord.__setstate__
 
 
-@define(frozen=True, slots=True, eq=False)
-class SplitTimeSeriesData:
+@dataclass(frozen=True, slots=True, kw_only=False, eq=False, weakref_slot=True)
+class SplitTimeSeriesData(DataclassRecord):
     """One time series after train/val/test partitioning with per-split statistics.
     经过训练/验证/测试分割后的一条时间序列，附带各分割的统计信息。
 
@@ -117,9 +145,9 @@ class SplitTimeSeriesData:
     val_stats: "PartitionStats"
     test_stats: "PartitionStats"
     cell: "TitrationCell | None" = None
-    metadata: Mapping[str, object] = field(factory=dict)
+    metadata: Mapping[str, object] = dataclass_field(default_factory=dict)
 
-    def __attrs_post_init__(self) -> None:
+    def __post_init__(self) -> None:
         values = np.array(self.values, dtype=np.float32, copy=True, order="C")
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "feature_names", tuple(self.feature_names))
@@ -143,6 +171,12 @@ class SplitTimeSeriesData:
     def test_values(self) -> np.ndarray:
         _, _, _, _, test_start, test_end = self.indices
         return self.values[test_start:test_end]
+
+    __eq__ = object.__eq__
+    __ne__ = object.__ne__
+    __hash__ = object.__hash__
+
+    __setstate__ = DataclassRecord.__setstate__
 
 
 def load_synthetic_data(
@@ -308,9 +342,37 @@ def load_data(
     """Load one source into the public `TimeSeriesData` handoff."""
     from .pipeline import KnownDataID, KnownMeta
     from .specs import TrajectorySpec
+    from .state_impulse_plan import StateImpulseSource
 
     if isinstance(source, TrajectorySpec):
         return load_synthetic_data(source, seed=seed)
+
+    # CHG: the named source keeps the declared random-event law and its frozen
+    # realization separate from the ordinary system preset in public metadata.
+    if isinstance(source, StateImpulseSource):
+        import msgspec
+
+        from .integrators import generate_from_trajectory_spec
+
+        spec = source.trajectory_spec
+        values = generate_from_trajectory_spec(
+            spec,
+            seed=seed,
+            dtype=np.float32,
+            step_schedule=source.realization.to_step_schedule(spec),
+        )
+        return TimeSeriesData(
+            values=values,
+            feature_names=source.realization.plan.variables,
+            source_id=source.dataset_id,
+            source_kind=SourceKind.SYNTHETIC,
+            metadata={
+                "system": spec.system.value,
+                "trajectory_spec": msgspec.to_builtins(spec),
+                "trajectory_seed": int(seed),
+                "state_impulse_realization": msgspec.to_builtins(source.realization),
+            },
+        )
 
     if isinstance(source, KnownMeta):
         return load_known_data(

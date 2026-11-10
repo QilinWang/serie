@@ -95,36 +95,26 @@ bun run build
 Keep the output filename as `public/attractor_data.json`; the frontend expects
 that name when built as a static folder.
 
-## Two engines: Python `serie` vs `serie-rs`
+## One live generator: Python `serie`
 
 The viewer is engine-agnostic — it only renders `noisy = clean + sigma * draw`
-from `attractor_data.json`. Two engines bake that exact contract:
+from `attractor_data.json`. The live Python package bakes that contract:
 
 ```bash
 bun run bake      # Python `serie`  → public/attractor_data.json
-bun run bake:rs   # Rust `serie-rs` → public/attractor_data.json (serie-rs demo shapes)
 ```
 
-`bun run bake:rs` calls the `serie-rs` CLI (`cargo run -q --manifest-path
-../../serie-rs/Cargo.toml -- demo shapes`). Bake with whichever engine, then
-`bun run build`; the build is identical otherwise.
+Then run `bun run build`. The former Rust generator is preserved under
+`retired/`; it is not an executable build dependency.
 
 The Fern site ships **both** as separate pages:
 
 - `/demo/serie`    — Python build, embedded from its standalone deployment
   (`site/src/pages/demo/serie.astro`, external iframe URL).
-- `/demo/serie-rs` — Rust build, **self-hosted** under `site/public/demo-rs/`
-  (`site/src/pages/demo/serie-rs.astro`, iframes `/demo-rs/index.html`).
+- `/demo/serie-rs` — frozen historical Rust showcase, **self-hosted** under
+  `site/public/demo-rs/` (`site/src/pages/demo/serie-rs.astro` iframes
+  `/demo-rs/index.html`). It is a static artifact, not a live generator route.
 
-To refresh the self-hosted serie-rs page:
-
-```bash
-cd serie/demo
-bun run bake:rs && bun run build
-rm -rf ../../site/public/demo-rs && mkdir -p ../../site/public/demo-rs
-cp -r dist/* ../../site/public/demo-rs/
-# (then restore the Python data file if you also serve /demo/serie locally)
-```
-
-Byte-parity with the Python bake is **not** required — the serie-rs page is a
-valid Rust-generated attractor in its own right.
+Do not regenerate the historical page as part of an ordinary build. New demo
+data comes from `bun run bake`; byte parity with the retired engine is not a
+product requirement.

@@ -9,7 +9,12 @@ Public API (also re-exported from ``serie``):
     inject_noise(bank, sigma=...)     → SplitTimeSeriesData  (inject many times / 多次注入)
     export_dgp_bank_files(bank, path) → dict       (write arrays to disk / 写数组到磁盘)
     export_dgp_bank_safetensors(bank, path) → dict (write one grouped tensor artifact)
+    materialize_cell(bank, spec)      → MaterializedCell
+    save_materialized_cell(cell, path) → dict
+    load_materialized_cell(path)      → MaterializedCell
     load_data(source)                 → TimeSeriesData  (load one source / 加载一个数据源)
+    generate_forced_pendulum(...)     → ForcedPendulumTrajectory
+    PendulumActionReplay(plant)       → execute proposed action actions
 
 DGP = Data Generating Process (数据生成过程).
 
@@ -183,6 +188,93 @@ def load_dgp_bank_safetensors(path):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 if TYPE_CHECKING:
+    from .splitting import (
+        GroupShuffleSpec,
+        SampleSplitManifest,
+        SplitAssignment,
+        SplitLabelCount,
+        SplitName,
+        SplitRuntime,
+        SplitSample,
+        SplitSource,
+        SplitSummary,
+        StageSplitSamples,
+        StratifiedGroupFoldsSpec,
+    )
+    from .images import (
+        ImageColorMode,
+        ImageFrame,
+        ImageFrameSource,
+        ImageOrientationMode,
+        ImagePartition,
+        ImagePartitionSample,
+        ImageSampleFile,
+        ImageSelectedSource,
+        ImageSequence,
+        ImageSequenceSource,
+        ImageSplitSource,
+        LoadedImageSample,
+        PreparedImage,
+        StageLoadImageSample,
+        StageLoadVerifiedImageSample,
+        StageLoadImageSequence,
+        StageResizePadNormalizeImage,
+        StageRecordImageSampleSelection,
+        StageSampleImageClasses,
+        StageSelectImagePartition,
+    )
+    from .counterfactual import PendulumActionReplay
+    from .controlled import (
+        ActionBankCoverage,
+        ActionCoverageKind as ActionCoverageKind,
+        HorizonEndStateActionResponseClaim as HorizonEndStateActionResponseClaim,
+        HorizonEndStateActionResponseSupport as HorizonEndStateActionResponseSupport,
+        HorizonEndStateActionResponseSupportKind as HorizonEndStateActionResponseSupportKind,
+        ActionProvenance as ActionProvenance,
+        ActionSequenceBank,
+        AdmittedControlledCase as AdmittedControlledCase,
+        AutonomousControlledField,
+        ControlledCaseIdentity as ControlledCaseIdentity,
+        ControlledDelayGardenReport,
+        ControlledLinearGaussian,
+        ControlledLinearSequence,
+        DEGREE_TWO_BASIS,
+        DegreeTwoControlledLgssmReport,
+        DegreeTwoLinearGaussianMoments,
+        ControlledPendulum,
+        ControlledRk4Oracle,
+        ForecastScope as ForecastScope,
+        GeometryCapacityClass as GeometryCapacityClass,
+        GeometryIdentity as GeometryIdentity,
+        ControlledLgssmCanary as ControlledLgssmCanary,
+        ControlledLgssmCanaryReport as ControlledLgssmCanaryReport,
+        Level0BCanary as Level0BCanary,
+        Level0BCanaryReport as Level0BCanaryReport,
+        Level0CCanary as Level0CCanary,
+        Level0CCanaryReport as Level0CCanaryReport,
+        ObservationProcess as ObservationProcess,
+        OracleErrorBound as OracleErrorBound,
+        OracleReportKind as OracleReportKind,
+        OracleTier as OracleTier,
+        ProcessNoiseDependence as ProcessNoiseDependence,
+        ProcessNoiseIdentity as ProcessNoiseIdentity,
+        DuffingField,
+        ForcedPendulumTrajectory,
+        ForcingPhaseCoordinates,
+        HorizonEndProduct,
+        HorizonEndResult,
+        Lorenz63Field,
+        Lorenz96Field,
+        PendulumState,
+        ScalarHiddenActuatorOracle,
+        ScalarStateDependentControlOracle,
+        SinusoidalTorqueDriver,
+        RosslerField,
+        VanDerPolField,
+        evaluate_controlled_delay_garden,
+        evaluate_degree_two_level0a,
+        generate_forced_pendulum,
+    )
     from .data import SplitTimeSeriesData, SourceKind, TimeSeriesData
     from .pipeline import (
         DataBundle,
@@ -190,13 +282,148 @@ if TYPE_CHECKING:
         KnownMeta,
         PartitionSpec,
         DrawDesign,
+        SigmaScale,
+        SplitTreatmentScheme,
         TitrationPlan,
     )
     from .specs import ShockEvent, ShockSchedule, ShockType, TitrationCell, TrajectorySpec, DGPBank
-    from .api import DGPBankTensors, build_clean_split_bundle, build_noisy_bundle_for_cell, iter_cells
+    from .state_impulse_plan import (
+        ImpulseCandidate,
+        ImpulseClock,
+        ImpulseClockKind,
+        ImpulseFormulaKind,
+        NamedStateTerm,
+        RealizedImpulse,
+        StateImpulsePlan,
+        StateImpulseRealization,
+        StateImpulseSource,
+        realize_state_impulse_plan,
+    )
+    from .simulator_interventions import (
+        ActionIntervention,
+        EnvironmentIntervention,
+        GoalIntervention,
+        InterventionKind,
+        ObservationNuisanceIntervention,
+        SemanticMeasureKind,
+        SemanticMeasureSpec,
+        SimulatorFieldPath,
+        SimulatorInterventionSpec,
+        load_simulator_intervention_spec,
+    )
+    from .api import (
+        CellMaterializationSpec,
+        DGPBankTensors,
+        MaterializedCell,
+        build_clean_split_bundle,
+        build_noisy_bundle_for_cell,
+        iter_cells,
+        load_materialized_cell,
+        materialize_cell,
+        save_materialized_cell,
+    )
 
 
 def __getattr__(name: str):
+    if name in {
+        "GroupShuffleSpec",
+        "SampleSplitManifest",
+        "SplitAssignment",
+        "SplitLabelCount",
+        "SplitName",
+        "SplitRuntime",
+        "SplitSample",
+        "SplitSource",
+        "SplitSummary",
+        "StageSplitSamples",
+        "StratifiedGroupFoldsSpec",
+    }:
+        from . import splitting
+
+        return getattr(splitting, name)
+    if name in {
+        "ImageColorMode",
+        "ImageFrame",
+        "ImageFrameSource",
+        "ImageOrientationMode",
+        "ImagePartition",
+        "ImagePartitionSample",
+        "ImageSampleFile",
+        "ImageSelectedSource",
+        "ImageSequence",
+        "ImageSequenceSource",
+        "ImageSplitSource",
+        "LoadedImageSample",
+        "PreparedImage",
+        "StageLoadImageSample",
+        "StageLoadVerifiedImageSample",
+        "StageLoadImageSequence",
+        "StageResizePadNormalizeImage",
+        "StageRecordImageSampleSelection",
+        "StageSampleImageClasses",
+        "StageSelectImagePartition",
+    }:
+        from . import images
+
+        return getattr(images, name)
+    if name == "PendulumActionReplay":
+        from .counterfactual import PendulumActionReplay
+
+        return PendulumActionReplay
+    if name in {
+        "ActionBankCoverage",
+        "ActionCoverageKind",
+        "HorizonEndStateActionResponseClaim",
+        "HorizonEndStateActionResponseSupport",
+        "HorizonEndStateActionResponseSupportKind",
+        "ActionProvenance",
+        "ActionSequenceBank",
+        "AdmittedControlledCase",
+        "AutonomousControlledField",
+        "ControlledCaseIdentity",
+        "ControlledDelayGardenReport",
+        "ControlledLinearGaussian",
+        "DEGREE_TWO_BASIS",
+        "DegreeTwoControlledLgssmReport",
+        "DegreeTwoLinearGaussianMoments",
+        "ControlledLinearSequence",
+        "ControlledPendulum",
+        "ControlledRk4Oracle",
+        "ForecastScope",
+        "GeometryCapacityClass",
+        "GeometryIdentity",
+        "ControlledLgssmCanary",
+        "ControlledLgssmCanaryReport",
+        "Level0BCanary",
+        "Level0BCanaryReport",
+        "Level0CCanary",
+        "Level0CCanaryReport",
+        "ObservationProcess",
+        "OracleErrorBound",
+        "OracleReportKind",
+        "OracleTier",
+        "ProcessNoiseDependence",
+        "ProcessNoiseIdentity",
+        "DuffingField",
+        "ForcedPendulumTrajectory",
+        "ForcingPhaseCoordinates",
+        "HorizonEndProduct",
+        "HorizonEndResult",
+        "Lorenz63Field",
+        "Lorenz96Field",
+        "PendulumState",
+        "ScalarHiddenActuatorOracle",
+        "ScalarStateDependentControlOracle",
+        "SinusoidalTorqueDriver",
+        "RosslerField",
+        "VanDerPolField",
+        "evaluate_controlled_delay_garden",
+        "evaluate_degree_two_level0a",
+        "generate_forced_pendulum",
+    }:
+        from . import controlled as _controlled
+
+        return getattr(_controlled, name)
     if name in {
         "TrajectorySpec",
         "DGPBank",
@@ -208,6 +435,36 @@ def __getattr__(name: str):
         from . import specs as _specs
 
         return getattr(_specs, name)
+    if name in {
+        "ImpulseCandidate",
+        "ImpulseClock",
+        "ImpulseClockKind",
+        "ImpulseFormulaKind",
+        "NamedStateTerm",
+        "RealizedImpulse",
+        "StateImpulsePlan",
+        "StateImpulseRealization",
+        "StateImpulseSource",
+        "realize_state_impulse_plan",
+    }:
+        from . import state_impulse_plan as _state_impulse_plan
+
+        return getattr(_state_impulse_plan, name)
+    if name in {
+        "ActionIntervention",
+        "EnvironmentIntervention",
+        "GoalIntervention",
+        "InterventionKind",
+        "ObservationNuisanceIntervention",
+        "SemanticMeasureKind",
+        "SemanticMeasureSpec",
+        "SimulatorFieldPath",
+        "SimulatorInterventionSpec",
+        "load_simulator_intervention_spec",
+    }:
+        from . import simulator_interventions as _simulator_interventions
+
+        return getattr(_simulator_interventions, name)
     if name in {
         "TimeSeriesData",
         "SplitTimeSeriesData",
@@ -224,6 +481,8 @@ def __getattr__(name: str):
         "KnownMeta",
         "PartitionSpec",
         "DrawDesign",
+        "SigmaScale",
+        "SplitTreatmentScheme",
         "TitrationPlan",
     }:
         from . import pipeline as _pipeline
@@ -236,7 +495,12 @@ def __getattr__(name: str):
         "export_dgp_bank_files",
         "export_dgp_bank_safetensors",
         "load_dgp_bank_safetensors",
+        "materialize_cell",
+        "save_materialized_cell",
+        "load_materialized_cell",
         "DGPBankTensors",
+        "CellMaterializationSpec",
+        "MaterializedCell",
     }:
         from . import api as _api
 
@@ -245,6 +509,37 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "GroupShuffleSpec",
+    "SampleSplitManifest",
+    "SplitAssignment",
+    "SplitLabelCount",
+    "SplitName",
+    "SplitRuntime",
+    "SplitSample",
+    "SplitSource",
+    "SplitSummary",
+    "StageSplitSamples",
+    "StratifiedGroupFoldsSpec",
+    "ImageColorMode",
+    "ImageFrame",
+    "ImageFrameSource",
+    "ImageOrientationMode",
+    "ImagePartition",
+    "ImagePartitionSample",
+    "ImageSampleFile",
+    "ImageSelectedSource",
+    "ImageSequence",
+    "ImageSequenceSource",
+    "ImageSplitSource",
+    "LoadedImageSample",
+    "PreparedImage",
+    "StageLoadImageSample",
+    "StageLoadVerifiedImageSample",
+    "StageLoadImageSequence",
+    "StageResizePadNormalizeImage",
+    "StageRecordImageSampleSelection",
+    "StageSampleImageClasses",
+    "StageSelectImagePartition",
     "__version__",
     "PROTOCOL_VERSION",
     # Types
@@ -253,28 +548,83 @@ __all__ = [
     "KnownDataID",
     "PartitionSpec",
     "DrawDesign",
+    "SigmaScale",
+    "SplitTreatmentScheme",
     "TitrationPlan",
     "KnownCleanConfig",
     "KnownLoadMode",
     "SourceKind",
     "DGPBank",
     "DGPBankTensors",
+    "CellMaterializationSpec",
+    "MaterializedCell",
     "TitrationCell",
     "ShockEvent",
     "ShockSchedule",
     "ShockType",
+    "ImpulseCandidate",
+    "ImpulseClock",
+    "ImpulseClockKind",
+    "ImpulseFormulaKind",
+    "NamedStateTerm",
+    "RealizedImpulse",
+    "StateImpulsePlan",
+    "StateImpulseRealization",
+    "StateImpulseSource",
+    "realize_state_impulse_plan",
+    "ActionIntervention",
+    "EnvironmentIntervention",
+    "GoalIntervention",
+    "InterventionKind",
+    "ObservationNuisanceIntervention",
+    "SemanticMeasureKind",
+    "SemanticMeasureSpec",
+    "SimulatorFieldPath",
+    "SimulatorInterventionSpec",
     "DataBundle",
     "TimeSeriesData",
     "SplitTimeSeriesData",
+    "ActionBankCoverage",
+    "ActionSequenceBank",
+    "AutonomousControlledField",
+    "ControlledDelayGardenReport",
+    "ControlledLinearGaussian",
+    "ControlledLinearSequence",
+    "DEGREE_TWO_BASIS",
+    "DegreeTwoControlledLgssmReport",
+    "DegreeTwoLinearGaussianMoments",
+    "ControlledPendulum",
+    "ControlledRk4Oracle",
+    "DuffingField",
+    "ForcedPendulumTrajectory",
+    "ForcingPhaseCoordinates",
+    "HorizonEndProduct",
+    "HorizonEndResult",
+    "Lorenz63Field",
+    "Lorenz96Field",
+    "PendulumState",
+    "PendulumActionReplay",
+    "ScalarHiddenActuatorOracle",
+    "ScalarStateDependentControlOracle",
+    "SinusoidalTorqueDriver",
+    "RosslerField",
+    "VanDerPolField",
     # Public functions
+    "evaluate_controlled_delay_garden",
+    "evaluate_degree_two_level0a",
+    "load_simulator_intervention_spec",
     "build_dgp_bank",
     "build_empirical_dgp_bank",
     "inject_noise",
     "export_dgp_bank_files",
     "export_dgp_bank_safetensors",
     "load_dgp_bank_safetensors",
+    "materialize_cell",
+    "save_materialized_cell",
+    "load_materialized_cell",
     "load_data",
     "iter_cells",
     "build_clean_split_bundle",
     "build_noisy_bundle_for_cell",
+    "generate_forced_pendulum",
 ]
